@@ -1,0 +1,23 @@
+{
+  "capital": 300.0,
+  "open_trades": {
+    "EUR/USD": {
+      "pair": "EUR/USD",
+      "direction": "long",
+      "entry": 1.15157,
+      "sl": 1.14319,
+      "tp": 1.16541,
+      "opened_at": "2026-03-19T20:35:00+05:30"
+    },
+    "GBP/USD": {
+      "pair": "GBP/USD",
+      "direction": "short",
+      "entry": 1.33495,
+      "sl": 1.34276,
+      "tp": 1.31109,
+      "opened_at": "2026-03-20T20:35:00+05:30"
+    }
+  },
+  "closed_trades": [],
+  "total_pnl": 0.0
+}

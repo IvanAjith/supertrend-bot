@@ -227,7 +227,12 @@ def cmd_trades():
     lines = ["📂 <b>OPEN TRADES</b>\n"]
     for pair, t in trades.items():
         c = price_cache.get(pair)
-        if c:
+        if not c:
+            sym = PAIRS.get(pair, "")
+            lp  = get_live_price(sym) if sym else None
+            if lp:
+                c = {"price": lp, "st": 0, "color": "UNKNOWN"}
+        if c and c.get("price"):
             price   = c["price"]
             dist_sl = round(abs(price - t["sl"]) * 10000, 1)
             dist_tp = round(abs(price - t["tp"]) * 10000, 1)
@@ -236,19 +241,27 @@ def cmd_trades():
             pnl_u   = round(pnl_p * 0.10, 2)
             sign    = "+" if pnl_u >= 0 else ""
             em      = "🟢" if t["direction"] == "long" else "🔴"
+            st_line = ""
+            if c.get("color") and c["color"] != "UNKNOWN":
+                st_icon = "🟢" if c["color"] == "GREEN" else "🔴"
+                st_line = f"  Supertrend :  {st_icon} {c['color']}\n"
             lines.append(
                 f"{em} <b>{pair}</b> — {t['direction'].upper()}\n"
                 f"  Entry      :  {round(t['entry'], 5)}\n"
                 f"  Current    :  {round(price,      5)}\n"
                 f"  Dist to SL :  {dist_sl} pips\n"
                 f"  Dist to TP :  {dist_tp} pips\n"
+                f"{st_line}"
                 f"  Unrealised :  {sign}{pnl_u} USD\n"
             )
         else:
+            em = "🟢" if t["direction"] == "long" else "🔴"
             lines.append(
-                f"<b>{pair}</b> — {t['direction'].upper()}\n"
-                f"  Entry: {round(t['entry'],5)}  "
-                f"SL: {round(t['sl'],5)}  TP: {round(t['tp'],5)}\n"
+                f"{em} <b>{pair}</b> — {t['direction'].upper()}\n"
+                f"  Entry      :  {round(t['entry'],5)}\n"
+                f"  Stop Loss  :  {round(t['sl'],   5)}\n"
+                f"  Target     :  {round(t['tp'],   5)}\n"
+                f"  Current    :  Fetching...\n"
             )
     return "\n".join(lines)
 

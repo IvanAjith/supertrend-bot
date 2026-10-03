@@ -148,6 +148,8 @@ def reply_to(cmd, d):
     if   cmd in ("/status",  "/s"): send_msg(cmd_status(d))
     elif cmd in ("/balance", "/b"): send_msg(cmd_balance(d))
     elif cmd in ("/trades",  "/t"): send_msg(cmd_trades(d))
+    elif cmd in ("/month",   "/m"): monthly_report(d)
+    elif cmd in ("/log",     "/l"): send_msg(cmd_log(d))
     elif cmd in ("/help",    "/h", "/start"): send_msg(cmd_help())
     else:                           send_msg("❓ Unknown command. Send /help")
 
@@ -157,6 +159,8 @@ def cmd_help():
         "/status  (or /s)  —  Bot alive + ST direction\n"
         "/balance (or /b)  —  Paper account balance\n"
         "/trades  (or /t)  —  Open trades + distances\n"
+        "/log     (or /l)  —  Last 5 closed trades\n"
+        "/month   (or /m)  —  This month's summary\n"
         "/help    (or /h)  —  This message\n\n"
         "<i>Runs on GitHub Actions: checks about every 5 minutes, "
         "so replies can take a few minutes.</i>"
@@ -209,6 +213,23 @@ def cmd_balance(d):
         f"<b>Win Rate</b>          :  {wr}%\n\n"
         f"<i>Paper trading only — no real money.</i>"
     )
+
+def cmd_log(d):
+    ct = d.get("closed_trades", [])
+    if not ct:
+        return "📒 <b>TRADE LOG</b>\n\nNo closed trades yet."
+    recent = ct[-5:][::-1]
+    lines = [f"📒 <b>TRADE LOG — last {len(recent)} of {len(ct)}</b>\n"]
+    for t in recent:
+        e = "✅" if "TP" in t.get("result", "") else "❌"
+        sg = "+" if t.get("pnl_usd", 0) >= 0 else ""
+        when = t.get("closed_at", "")[:16].replace("T", " ")
+        lines.append(
+            f"{e} #{t.get('id', '-')} {t.get('pair', '?')} {str(t.get('direction', '?')).upper()}  "
+            f"{sg}{t.get('pnl_usd', 0)} USD ({sg}{t.get('pnl_pips', 0)} pips)\n"
+            f"     {when} IST")
+    lines.append("\n<i>Full history: paper_trades.json in your GitHub repo.</i>")
+    return "\n".join(lines)
 
 def cmd_trades(d):
     trades = d.get("open_trades", {})
@@ -375,10 +396,21 @@ def detect_signal(df):
 # =============================================================
 #  MESSAGES
 # =============================================================
-def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_candle):
+def candle_time_ist(ctime):
+    """'2026-10-05 09:00:00' (UTC candle OPEN time) -> '05 Oct 2026  02:30 PM IST'."""
+    try:
+        dt = datetime.strptime(ctime, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt.astimezone(IST).strftime("%d %b %Y  %I:%M %p IST")
+    except Exception:
+        return str(ctime)
+
+def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_candle,
+            ctime=None, trade_id=None):
     """
     Entry = live price right now. SL distance comes from the Supertrend line
     at the flip candle; SL/TP are re-anchored to the live entry price.
+    The message also shows the flip candle's time and close so the signal can
+    be matched against the TradingView indicator.
     """
     act    = "BUY" if direction == "long" else "SELL"
     em     = "🟢" if direction == "long" else "🔴"
@@ -399,10 +431,18 @@ def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_c
     loss   = round(slp * PIP_USD, 2)
     prof   = round(tpp * PIP_USD, 2)
     now    = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
+    tid    = f"  #{trade_id}" if trade_id else ""
+    chart  = ""
+    if ctime:
+        chart = (
+            f"\n🔎 <b>Match on TradingView (1H)</b>\n"
+            f"   Flip candle opened :  {candle_time_ist(ctime)}\n"
+            f"   Candle close       :  {round(candle_close, 5)}\n"
+        )
 
     return (
         f"{bar}\n"
-        f"‼️ <b>🚨{em}🚨  {act} SIGNAL FIRED  🚨{em}🚨</b> ‼️\n"
+        f"‼️ <b>🚨{em}🚨  {act} SIGNAL FIRED{tid}  🚨{em}🚨</b> ‼️\n"
         f"{bar}\n\n"
         f"<b>Pair</b>       :  {pair}\n"
         f"<b>Time</b>       :  {now}\n\n"
@@ -413,7 +453,8 @@ def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_c
         f"🛑 <b>Stop Loss</b> :  {round(sl,    5)}  ({slp} pips)\n"
         f"🎯 <b>Target</b>    :  {round(tp,    5)}  ({tpp} pips)\n\n"
         f"💼 Lot:{LOT_SIZE}  💸 Risk:-${loss}  💰 Reward:+${prof}\n"
-        f"📊 RR: 1:{RR}\n\n"
+        f"📊 RR: 1:{RR}\n"
+        f"{chart}\n"
         f"<i>✅ Paper trade logged automatically.</i>\n\n"
         f"{bar}"
     ), entry, sl, tp
@@ -430,18 +471,22 @@ def status_msg(statuses):
     lines.append("<i>Checking about every 5 min. /status anytime.</i>")
     return "\n".join(lines)
 
-def close_msg(pair, direction, entry, exit_px, pnl, pips, result, bal):
+def close_msg(pair, direction, entry, exit_px, pnl, pips, result, bal,
+              trade_id=None, hours=None):
     em   = "✅" if "TP" in result else "❌"
     lb   = "TARGET HIT — PROFIT" if "TP" in result else "STOP HIT — LOSS"
     sign = "+" if pnl >= 0 else ""
+    tid  = f" (#{trade_id})" if trade_id else ""
+    dur  = f"<b>Duration</b>  :  {hours} hours\n" if hours is not None else ""
     return (
-        f"{em} <b>TRADE CLOSED — {pair}</b>\n\n"
+        f"{em} <b>TRADE CLOSED — {pair}{tid}</b>\n\n"
         f"<b>Result</b>    :  {lb}\n"
         f"<b>Direction</b> :  {direction.upper()}\n\n"
         f"<b>Entry</b>     :  {round(entry,   5)}\n"
         f"<b>Exit</b>      :  {round(exit_px, 5)}\n"
         f"<b>P&L</b>       :  {sign}{round(pnl,2)} USD "
-        f"({sign}{round(pips,1)} pips)\n\n"
+        f"({sign}{round(pips,1)} pips)\n"
+        f"{dur}\n"
         f"<b>Balance</b>   :  ${round(bal,2)}"
     )
 
@@ -722,14 +767,20 @@ def check_exits(d, dfs):
             pnl  = round(pips*PIP_USD, 2)
             d["capital"]   = d.get("capital",   PAPER_CAPITAL) + pnl
             d["total_pnl"] = d.get("total_pnl", 0.0)          + pnl
+            now_ist = datetime.now(IST)
+            hours = round((now_ist - datetime.fromisoformat(t["opened_at"])
+                           ).total_seconds() / 3600, 2)
             d.setdefault("closed_trades", []).append({
                 **t, "exit_price": ep, "pnl_usd": pnl,
                 "pnl_pips": round(pips, 1), "result": res,
-                "closed_at": datetime.now(IST).isoformat()
+                "duration_hours": hours,
+                "balance_after": round(d["capital"], 2),
+                "closed_at": now_ist.isoformat()
             })
             del d["open_trades"][pair]
             send_msg(close_msg(pair, t["direction"], t["entry"],
-                               ep, pnl, pips, res, d["capital"]))
+                               ep, pnl, pips, res, d["capital"],
+                               trade_id=t.get("id"), hours=hours))
             print(f"[Closed] {pair} {res} PnL:{pnl}")
         except Exception as e:
             print(f"[Exit Error] {pair}: {e}")
@@ -763,16 +814,27 @@ def scan_signals(d, dfs):
         print(f"  {pair}: *** {sig.upper()} ***")
         print(f"  Candle close: {candle_close:.5f}  Live price: {live_price:.5f}")
 
+        meta["trade_seq"] = meta.get("trade_seq", 0) + 1
+        trade_id = meta["trade_seq"]
         msg, entry, sl, tp = sig_msg(
-            pair, sig, live_price, candle_close, candle_sl, candle_tp)
+            pair, sig, live_price, candle_close, candle_sl, candle_tp,
+            ctime, trade_id)
+        sl_pips = round(abs(entry - sl) * 10000, 1)
+        tp_pips = round(abs(tp - entry) * 10000, 1)
 
         # Record the trade BEFORE messaging so a failed send can never
         # cause a duplicate entry on the next run.
         last_sig[pair] = ctime
         d["open_trades"][pair] = {
+            "id": trade_id,
             "pair": pair, "direction": sig,
             "entry": entry, "sl": sl, "tp": tp,
-            "candle_close": candle_close,
+            "sl_pips": sl_pips, "tp_pips": tp_pips,
+            "risk_usd":   round(sl_pips * PIP_USD, 2),
+            "reward_usd": round(tp_pips * PIP_USD, 2),
+            "lot": LOT_SIZE,
+            "signal_candle_utc": ctime,          # open time of the 1H flip candle
+            "candle_close": candle_close,        # TradingView-style entry price
             "opened_at": datetime.now(IST).isoformat()
         }
         send_msg(msg)

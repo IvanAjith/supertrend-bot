@@ -1,0 +1,152 @@
+//@version=6
+indicator("Supertrend Paper Bot (replica)", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// ═══════════════════════════════════════════════════════════════
+//  Replica of the Telegram paper-trading bot — use on a 1H chart
+//  Same rules: Supertrend flip -> one trade at a time -> SL at the
+//  Supertrend line, TP = RR x SL distance, exits checked on each
+//  candle's HIGH / LOW (stop first if both are touched).
+// ═══════════════════════════════════════════════════════════════
+
+G1 = "Strategy — same numbers as the bot"
+G2 = "Paper account"
+
+atrLen    = input.int(13,     "ATR period",        minval = 1,   group = G1)
+factor    = input.float(4.11, "Supertrend factor", minval = 0.1, step = 0.01, group = G1)
+rr        = input.float(1.7,  "Reward : Risk",     minval = 0.1, step = 0.1,  group = G1)
+fromDate  = input.time(timestamp("03 Oct 2026 00:00 +0530"), "Start paper trading from (set earlier to backtest)", group = G1)
+
+startCap  = input.float(300.0, "Paper capital ($)", minval = 1, group = G2)
+lotSize   = input.float(0.01,  "Lot size", minval = 0.01, step = 0.01, group = G2)
+pipUsd    = input.float(0.10,  "$ per pip at 0.01 lot (USD-quoted pairs)", minval = 0.0001, step = 0.01, group = G2)
+pipSizeIn = input.float(0.0,   "Pip size override (0 = auto)", minval = 0.0, step = 0.0001, group = G2)
+showTbl   = input.bool(true,   "Show account table", group = G2)
+showFlips = input.bool(true,   "Mark every Supertrend flip (incl. ignored ones)", group = G2)
+
+usdPerPip = pipUsd * lotSize / 0.01
+pip       = pipSizeIn > 0 ? pipSizeIn : syminfo.mintick * 10
+
+// ───────────────────────── Supertrend ─────────────────────────
+[st, dir] = ta.supertrend(factor, atrLen)      // dir < 0 = uptrend (green), dir > 0 = downtrend (red)
+flipUp    = dir < 0 and dir[1] > 0
+flipDn    = dir > 0 and dir[1] < 0
+inRange   = time >= fromDate
+confirmed = barstate.isconfirmed
+
+plot(dir < 0 ? st : na, "Uptrend",   color = color.green, linewidth = 2, style = plot.style_linebr)
+plot(dir > 0 ? st : na, "Downtrend", color = color.red,   linewidth = 2, style = plot.style_linebr)
+plotshape(showFlips and flipUp, title = "Flip up",   style = shape.triangleup,   location = location.belowbar, color = color.new(color.green, 50), size = size.tiny)
+plotshape(showFlips and flipDn, title = "Flip down", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 50),   size = size.tiny)
+
+// ───────────────────────── Paper account state ─────────────────────────
+var bool  inTrade  = false
+var int   side     = 0
+var int   entryBar = na
+var float entryPx  = na
+var float slPx     = na
+var float tpPx     = na
+var line  lnEntry  = na
+var line  lnSl     = na
+var line  lnTp     = na
+var float balance  = startCap
+var float totalPnl = 0.0
+var int   wins     = 0
+var int   losses   = 0
+var int   tradeNo  = 0
+
+bool   openedNow = false
+bool   closedNow = false
+string openMsg   = ""
+string closeMsg  = ""
+
+// ───────────── 1) Manage the open trade (candles AFTER the entry candle) ─────────────
+if inTrade and confirmed and bar_index > entryBar
+    hitSl = side == 1 ? low <= slPx : high >= slPx
+    hitTp = side == 1 ? high >= tpPx : low <= tpPx
+    if hitSl or hitTp
+        isTp     = not hitSl                    // both in one candle -> stop counts first (like the bot)
+        exitPx   = isTp ? tpPx : slPx
+        pips     = side * (exitPx - entryPx) / pip
+        pnl      = pips * usdPerPip
+        balance  += pnl
+        totalPnl += pnl
+        if isTp
+            wins += 1
+        else
+            losses += 1
+        line.set_x2(lnEntry, bar_index)
+        line.set_x2(lnSl, bar_index)
+        line.set_x2(lnTp, bar_index)
+        sgn       = pnl >= 0 ? "+" : "-"
+        closeMsg := (isTp ? "✅ TARGET HIT" : "❌ STOP HIT") + "  #" + str.tostring(tradeNo)
+        closeMsg += "\n" + (side == 1 ? "BUY " : "SELL ") + syminfo.ticker
+        closeMsg += "\nEntry : " + str.tostring(entryPx, format.mintick)
+        closeMsg += "\nExit  : " + str.tostring(exitPx, format.mintick)
+        closeMsg += "\nP&L   : " + sgn + "$" + str.tostring(math.round(math.abs(pnl), 2)) + "  (" + sgn + str.tostring(math.round(math.abs(pips), 1)) + " pips)"
+        closeMsg += "\nBalance : $" + str.tostring(math.round(balance, 2))
+        exitAbove = (side == 1 and isTp) or (side == -1 and not isTp)
+        label.new(bar_index, exitPx, closeMsg, style = exitAbove ? label.style_label_down : label.style_label_up, color = isTp ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+        closedNow := true
+        inTrade   := false
+
+// ───────────── 2) New signal — only when flat (one trade at a time, like the bot) ─────────────
+if not inTrade and confirmed and inRange and (flipUp or flipDn)
+    tradeNo  += 1
+    side     := flipUp ? 1 : -1
+    entryBar := bar_index
+    entryPx  := close                           // bot enters at the LIVE price a few minutes later
+    dist      = math.abs(close - st)            // stop distance = candle close to the Supertrend line
+    slPx     := side == 1 ? close - dist : close + dist
+    tpPx     := side == 1 ? close + dist * rr : close - dist * rr
+    inTrade  := true
+    isBuy     = side == 1
+    slPips    = dist / pip
+    tpPips    = dist * rr / pip
+    riskUsd   = slPips * usdPerPip
+    rewUsd    = tpPips * usdPerPip
+    openMsg  := (isBuy ? "🟢 BUY SIGNAL" : "🔴 SELL SIGNAL") + "  #" + str.tostring(tradeNo) + "  " + syminfo.ticker
+    openMsg  += "\nEntry (candle close) : " + str.tostring(entryPx, format.mintick)
+    openMsg  += "\nStop Loss : " + str.tostring(slPx, format.mintick) + "  (" + str.tostring(math.round(slPips, 1)) + " pips)"
+    openMsg  += "\nTarget    : " + str.tostring(tpPx, format.mintick) + "  (" + str.tostring(math.round(tpPips, 1)) + " pips)"
+    openMsg  += "\nLot " + str.tostring(lotSize) + "  |  Risk -$" + str.tostring(math.round(riskUsd, 2)) + "  |  Reward +$" + str.tostring(math.round(rewUsd, 2)) + "  |  RR 1:" + str.tostring(rr)
+    lnEntry  := line.new(bar_index, entryPx, bar_index + 1, entryPx, color = color.gray,  style = line.style_dashed, width = 1)
+    lnSl     := line.new(bar_index, slPx,    bar_index + 1, slPx,    color = color.red,   width = 1)
+    lnTp     := line.new(bar_index, tpPx,    bar_index + 1, tpPx,    color = color.green, width = 1)
+    label.new(bar_index, isBuy ? low : high, openMsg, style = isBuy ? label.style_label_up : label.style_label_down, color = isBuy ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+    openedNow := true
+
+// keep the entry / stop / target lines growing while the trade is open
+if inTrade and confirmed
+    line.set_x2(lnEntry, bar_index + 1)
+    line.set_x2(lnSl,    bar_index + 1)
+    line.set_x2(lnTp,    bar_index + 1)
+
+// ───────────── Alerts: same text as the labels (Alert -> "Any alert() function call") ─────────────
+if openedNow
+    alert(openMsg, alert.freq_once_per_bar_close)
+if closedNow
+    alert(closeMsg, alert.freq_once_per_bar_close)
+
+// ───────────────────────── Account table ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+if showTbl and barstate.islast
+    total = wins + losses
+    wr    = total > 0 ? wins * 100.0 / total : 0.0
+    ret   = (balance - startCap) / startCap * 100
+    pnlCol = totalPnl >= 0 ? color.lime : color.red
+    table.cell(tbl, 0, 0, "PAPER BOT", text_color = color.white, bgcolor = color.new(color.blue, 30))
+    table.cell(tbl, 1, 0, syminfo.ticker + " 1H", text_color = color.white, bgcolor = color.new(color.blue, 30))
+    table.cell(tbl, 0, 1, "Balance",   text_color = color.silver)
+    table.cell(tbl, 1, 1, "$" + str.tostring(math.round(balance, 2)), text_color = color.white)
+    table.cell(tbl, 0, 2, "Total P&L", text_color = color.silver)
+    table.cell(tbl, 1, 2, (totalPnl >= 0 ? "+" : "-") + "$" + str.tostring(math.round(math.abs(totalPnl), 2)), text_color = pnlCol)
+    table.cell(tbl, 0, 3, "Return",    text_color = color.silver)
+    table.cell(tbl, 1, 3, str.tostring(math.round(ret, 2)) + "%", text_color = pnlCol)
+    table.cell(tbl, 0, 4, "Trades (W/L)", text_color = color.silver)
+    table.cell(tbl, 1, 4, str.tostring(total) + "  (" + str.tostring(wins) + "/" + str.tostring(losses) + ")", text_color = color.white)
+    table.cell(tbl, 0, 5, "Win rate",   text_color = color.silver)
+    table.cell(tbl, 1, 5, str.tostring(math.round(wr, 1)) + "%", text_color = color.white)
+    table.cell(tbl, 0, 6, "Open trade", text_color = color.silver)
+    table.cell(tbl, 1, 6, inTrade ? ((side == 1 ? "BUY @ " : "SELL @ ") + str.tostring(entryPx, format.mintick)) : "none", text_color = color.white)
+    table.cell(tbl, 0, 7, timeframe.in_seconds() == 3600 ? "Timeframe" : "⚠ Timeframe", text_color = color.silver)
+    table.cell(tbl, 1, 7, timeframe.in_seconds() == 3600 ? "1H ✓" : "Switch to 1H!", text_color = timeframe.in_seconds() == 3600 ? color.lime : color.orange)

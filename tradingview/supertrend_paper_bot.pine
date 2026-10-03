@@ -48,6 +48,7 @@ var float tpPx     = na
 var line  lnEntry  = na
 var line  lnSl     = na
 var line  lnTp     = na
+var label lbOpen   = na
 var float balance  = startCap
 var float totalPnl = 0.0
 var int   wins     = 0
@@ -77,6 +78,12 @@ if inTrade and confirmed and bar_index > entryBar
         line.set_x2(lnEntry, bar_index)
         line.set_x2(lnSl, bar_index)
         line.set_x2(lnTp, bar_index)
+        // trade is closed -> fade its signal label and lines (open trades stay solid)
+        label.set_color(lbOpen, color.new(side == 1 ? color.green : color.red, 80))
+        label.set_textcolor(lbOpen, color.new(color.white, 60))
+        line.set_color(lnEntry, color.new(color.gray, 80))
+        line.set_color(lnSl, color.new(color.red, 80))
+        line.set_color(lnTp, color.new(color.green, 80))
         sgn       = pnl >= 0 ? "+" : "-"
         closeMsg := (isTp ? "✅ TARGET HIT" : "❌ STOP HIT") + "  #" + str.tostring(tradeNo)
         closeMsg += "\n" + (side == 1 ? "BUY " : "SELL ") + syminfo.ticker
@@ -85,7 +92,7 @@ if inTrade and confirmed and bar_index > entryBar
         closeMsg += "\nP&L   : " + sgn + "$" + str.tostring(math.round(math.abs(pnl), 2)) + "  (" + sgn + str.tostring(math.round(math.abs(pips), 1)) + " pips)"
         closeMsg += "\nBalance : $" + str.tostring(math.round(balance, 2))
         exitAbove = (side == 1 and isTp) or (side == -1 and not isTp)
-        label.new(bar_index, exitPx, closeMsg, style = exitAbove ? label.style_label_down : label.style_label_up, color = isTp ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+        label.new(bar_index, exitPx, closeMsg, style = exitAbove ? label.style_label_down : label.style_label_up, color = color.new(isTp ? color.green : color.red, 80), textcolor = color.new(color.white, 60), size = size.normal, textalign = text.align_left)
         closedNow := true
         inTrade   := false
 
@@ -112,7 +119,7 @@ if not inTrade and confirmed and inRange and (flipUp or flipDn)
     lnEntry  := line.new(bar_index, entryPx, bar_index + 1, entryPx, color = color.gray,  style = line.style_dashed, width = 1)
     lnSl     := line.new(bar_index, slPx,    bar_index + 1, slPx,    color = color.red,   width = 1)
     lnTp     := line.new(bar_index, tpPx,    bar_index + 1, tpPx,    color = color.green, width = 1)
-    label.new(bar_index, isBuy ? low : high, openMsg, style = isBuy ? label.style_label_up : label.style_label_down, color = isBuy ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+    lbOpen   := label.new(bar_index, isBuy ? low : high, openMsg, style = isBuy ? label.style_label_up : label.style_label_down, color = isBuy ? color.green : color.red, textcolor = color.white, size = size.normal, textalign = text.align_left)
     openedNow := true
 
 // keep the entry / stop / target lines growing while the trade is open

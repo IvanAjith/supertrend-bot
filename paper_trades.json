@@ -3,5 +3,7 @@
   "open_trades": {},
   "closed_trades": [],
   "total_pnl": 0.0,
-  "meta": {}
+  "meta": {
+    "last_weekly_close": "2026-10-03"
+  }
 }

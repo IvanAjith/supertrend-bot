@@ -1,25 +1,41 @@
 """
-SUPERTREND PAPER TRADING BOT — FIXED VERSION
-Fixes:
-  1. Checks every 5 minutes instead of hourly
-     → Catches flip within 5 mins of candle close
-     → Entry price is much closer to actual live price
-  2. Uses current live price as entry (not stale candle close)
-  3. Persistent trade storage via Railway environment variable
-     → Trades survive bot restarts forever
+SUPERTREND PAPER TRADING BOT — GITHUB ACTIONS EDITION
 
-Pairs     : EUR/USD, GBP/USD
-Timeframe : 1H candles (checked every 5 min)
-Settings  : ATR 13, Factor 4.11, RR 1.7
-Capital   : $300 paper account
+How it runs
+  GitHub Actions wakes this script roughly every 5 minutes (see
+  .github/workflows/bot.yml). Each run does ONE pass and exits:
+    1. loads state from paper_trades.json
+    2. answers any Telegram commands received since the last run
+    3. fetches 1H candles, checks exits, looks for a new Supertrend flip
+    4. sends scheduled reports (hourly status, EOD, weekly, monthly)
+    5. saves state back to paper_trades.json (the workflow commits it)
+
+Strategy (unchanged)
+  Pairs     : EUR/USD, GBP/USD      Timeframe : 1H candles
+  Settings  : ATR 13, Factor 4.11, RR 1.7
+  Capital   : $300 paper account, 0.01 lot ($0.10 per pip)
+
+What changed vs the Railway version
+  - No endless loop / scheduler: one pass per run, state lives in the repo
+  - Stop-loss / target are checked against each candle's HIGH and LOW since
+    entry, so a late or skipped run can no longer miss a hit
+  - Scheduled reports fire in a time window (not at an exact minute) because
+    GitHub can start runs several minutes late
+  - Telegram commands are answered on the next run (up to a few minutes)
 """
 
-import time, json, os, requests, schedule, threading
-from datetime import datetime, timezone, timedelta
+import os
+import sys
+import json
+import time
+import calendar
+import requests
 import pandas as pd
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 # =============================================================
-#  CONFIG — from Railway environment variables
+#  CONFIG — secrets come from GitHub Actions secrets (env vars)
 # =============================================================
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN",  "")
 CHAT_ID         = os.environ.get("CHAT_ID",         "")
@@ -30,6 +46,7 @@ ST_FACTOR     = 4.11
 RR            = 1.7
 PAPER_CAPITAL = 300.0
 LOT_SIZE      = 0.01
+PIP_USD       = 0.10      # $ per pip at 0.01 lot on a USD-quoted pair
 
 PAIRS = {
     "EUR/USD": "EUR/USD",
@@ -37,65 +54,47 @@ PAIRS = {
 }
 
 IST          = timezone(timedelta(hours=5, minutes=30))
-NO_SIG_START = 13
+NO_SIG_START = 13          # hourly status window (IST hours)
 NO_SIG_END   = 23
 
-# In-memory state
-last_signal    = {}   # pair -> candle timestamp of last signal sent
-last_update_id = 0
-price_cache    = {}
+STATE_FILE = Path(__file__).with_name("paper_trades.json")
+
+# Rebuilt on every run from fresh candles
+price_cache = {}
 
 
 # =============================================================
-#  PERSISTENT STORAGE
-#  Trades stored as Railway env var "TRADE_DATA" (JSON string)
-#  Falls back to local file if env var not available
+#  STATE  (paper_trades.json, committed back to the repo)
 # =============================================================
-TRADES_FILE = "paper_trades.json"
-
 def load():
-    default = {
+    d = {
         "capital":       PAPER_CAPITAL,
         "open_trades":   {},
         "closed_trades": [],
-        "total_pnl":     0.0
+        "total_pnl":     0.0,
+        "meta":          {},
     }
-    # Try environment variable first (survives Railway restarts)
-    env_data = os.environ.get("TRADE_DATA", "")
-    if env_data:
-        try:
-            saved = json.loads(env_data)
-            for k, v in default.items():
-                if k not in saved:
-                    saved[k] = v
-            return saved
-        except:
-            pass
-    # Fall back to local file
-    if os.path.exists(TRADES_FILE):
-        try:
-            saved = json.load(open(TRADES_FILE))
-            for k, v in default.items():
-                if k not in saved:
-                    saved[k] = v
-            return saved
-        except:
-            pass
-    return default
+    if STATE_FILE.exists():
+        # A corrupt file raises on purpose: failing loudly is better than
+        # silently wiping the trade history.
+        saved = json.loads(STATE_FILE.read_text())
+        if isinstance(saved, dict):
+            d.update(saved)
+    if not isinstance(d.get("meta"), dict):
+        d["meta"] = {}
+    return d
 
 def save(d):
-    # Always save to local file
-    json.dump(d, open(TRADES_FILE, "w"), indent=2)
-    # Also update Railway env var via API if possible
-    # (Railway doesn't support dynamic env var updates via API)
-    # So we rely on local file + periodic backup to Telegram
-    print(f"[Save] Capital:{round(d.get('capital',0),2)} "
-          f"Open:{len(d.get('open_trades',{}))} "
-          f"Closed:{len(d.get('closed_trades',[]))}")
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2))
+    os.replace(tmp, STATE_FILE)
+    print(f"[Save] Capital:{round(d.get('capital', 0), 2)} "
+          f"Open:{len(d.get('open_trades', {}))} "
+          f"Closed:{len(d.get('closed_trades', []))}")
 
 
 # =============================================================
-#  TELEGRAM SEND
+#  TELEGRAM
 # =============================================================
 def send_msg(msg: str):
     try:
@@ -106,55 +105,52 @@ def send_msg(msg: str):
         if r.status_code == 200:
             print("[TG] Sent.")
         else:
-            print(f"[TG Error] {r.status_code}")
+            print(f"[TG Error] {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[TG Exception] {e}")
 
-
-# =============================================================
-#  TELEGRAM RECEIVE
-# =============================================================
-def get_updates():
-    global last_update_id
+def fetch_commands(meta):
+    """Return the list of commands sent to the bot since the last run."""
+    last_id = meta.get("last_update_id", 0)
+    params  = {"timeout": 0}
+    if last_id:
+        params["offset"] = last_id + 1
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params={"offset": last_update_id + 1, "timeout": 10},
-            timeout=15)
+            params=params, timeout=15)
         if r.status_code != 200:
+            print(f"[GetUpdates Error] {r.status_code} {r.text[:200]}")
             return []
         updates = r.json().get("result", [])
-        if updates:
-            last_update_id = updates[-1]["update_id"]
-        return updates
     except Exception as e:
         print(f"[GetUpdates Error] {e}")
         return []
 
-def handle_commands():
-    print("[Commands] Started.")
-    while True:
-        try:
-            for update in get_updates():
-                msg_obj = update.get("message", {})
-                text    = msg_obj.get("text", "").strip().lower()
-                from_id = str(msg_obj.get("chat", {}).get("id", ""))
-                if from_id != str(CHAT_ID):
-                    continue
-                if   text in ["/status",  "/s"]: send_msg(cmd_status())
-                elif text in ["/balance", "/b"]: send_msg(cmd_balance())
-                elif text in ["/trades",  "/t"]: send_msg(cmd_trades())
-                elif text in ["/help",    "/h"]: send_msg(cmd_help())
-                elif text.startswith("/"):
-                    send_msg("❓ Unknown command. Send /help")
-        except Exception as e:
-            print(f"[Commands Error] {e}")
-        time.sleep(5)
+    commands = []
+    for u in updates:
+        meta["last_update_id"] = max(meta.get("last_update_id", 0), u["update_id"])
+        msg = u.get("message", {}) or {}
+        if str(msg.get("chat", {}).get("id", "")) != str(CHAT_ID):
+            continue
+        text = (msg.get("text") or "").strip().lower()
+        if text.startswith("/"):
+            commands.append(text.split()[0].split("@")[0])   # "/status@mybot" -> "/status"
+    return commands
 
 
 # =============================================================
-#  COMMANDS
+#  COMMAND REPLIES
 # =============================================================
+DATA_CMDS = {"/status", "/s", "/trades", "/t"}
+
+def reply_to(cmd, d):
+    if   cmd in ("/status",  "/s"): send_msg(cmd_status(d))
+    elif cmd in ("/balance", "/b"): send_msg(cmd_balance(d))
+    elif cmd in ("/trades",  "/t"): send_msg(cmd_trades(d))
+    elif cmd in ("/help",    "/h", "/start"): send_msg(cmd_help())
+    else:                           send_msg("❓ Unknown command. Send /help")
+
 def cmd_help():
     return (
         "🤖 <b>SUPERTREND BOT — Commands</b>\n\n"
@@ -162,22 +158,23 @@ def cmd_help():
         "/balance (or /b)  —  Paper account balance\n"
         "/trades  (or /t)  —  Open trades + distances\n"
         "/help    (or /h)  —  This message\n\n"
-        "<i>Checks every 5 minutes for new signals</i>"
+        "<i>Runs on GitHub Actions: checks about every 5 minutes, "
+        "so replies can take a few minutes.</i>"
     )
 
-def cmd_status():
+def cmd_status(d):
     now = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
     lines = [
         "✅ <b>BOT IS ALIVE</b>\n",
         f"<b>Time</b>   :  {now}",
         f"<b>Pairs</b>  :  EUR/USD + GBP/USD",
-        f"<b>Check</b>  :  Every 5 minutes\n",
+        f"<b>Check</b>  :  About every 5 minutes\n",
         "─── SUPERTREND STATUS ───"
     ]
     for pair in PAIRS:
         c = price_cache.get(pair)
         if not c:
-            lines.append(f"\n⚪ <b>{pair}</b>  —  Loading...")
+            lines.append(f"\n⚪ <b>{pair}</b>  —  No data (market closed?)")
         else:
             em = "🟢" if c["color"] == "GREEN" else "🔴"
             tr = "GREEN — Uptrend" if c["color"] == "GREEN" else "RED — Downtrend"
@@ -187,13 +184,11 @@ def cmd_status():
                 f"   ST Value   :  {round(c['st'],    5)}\n"
                 f"   Price Now  :  {round(c['price'], 5)}"
             )
-    d = load()
     lines.append(f"\n<b>Open trades</b>  :  {len(d.get('open_trades', {}))}")
-    lines.append("\n<i>Bot running on Railway.app 24/7</i>")
+    lines.append("\n<i>Running on GitHub Actions</i>")
     return "\n".join(lines)
 
-def cmd_balance():
-    d     = load()
+def cmd_balance(d):
     cap   = d.get("capital",       PAPER_CAPITAL)
     pnl   = d.get("total_pnl",     0.0)
     ct    = d.get("closed_trades",  [])
@@ -215,14 +210,13 @@ def cmd_balance():
         f"<i>Paper trading only — no real money.</i>"
     )
 
-def cmd_trades():
-    d      = load()
+def cmd_trades(d):
     trades = d.get("open_trades", {})
     if not trades:
         return (
             "📂 <b>OPEN TRADES</b>\n\n"
             "No open positions right now.\n\n"
-            "<i>Bot is watching for signals every 5 minutes.</i>"
+            "<i>Bot is watching for signals about every 5 minutes.</i>"
         )
     lines = ["📂 <b>OPEN TRADES</b>\n"]
     for pair, t in trades.items():
@@ -238,7 +232,7 @@ def cmd_trades():
             dist_tp = round(abs(price - t["tp"]) * 10000, 1)
             pnl_p   = (price - t["entry"]) * 10000 if t["direction"] == "long" \
                       else (t["entry"] - price) * 10000
-            pnl_u   = round(pnl_p * 0.10, 2)
+            pnl_u   = round(pnl_p * PIP_USD, 2)
             sign    = "+" if pnl_u >= 0 else ""
             em      = "🟢" if t["direction"] == "long" else "🔴"
             st_line = ""
@@ -261,7 +255,7 @@ def cmd_trades():
                 f"  Entry      :  {round(t['entry'],5)}\n"
                 f"  Stop Loss  :  {round(t['sl'],   5)}\n"
                 f"  Target     :  {round(t['tp'],   5)}\n"
-                f"  Current    :  Fetching...\n"
+                f"  Current    :  Unavailable\n"
             )
     return "\n".join(lines)
 
@@ -275,6 +269,7 @@ def get_data(symbol):
         "symbol":     symbol,
         "interval":   "1h",
         "outputsize": 100,
+        "timezone":   "UTC",       # candle timestamps in UTC (exit logic relies on it)
         "apikey":     TWELVE_DATA_KEY,
         "format":     "JSON"
     }
@@ -291,7 +286,7 @@ def get_data(symbol):
             if not values:
                 time.sleep(5); continue
             df = pd.DataFrame(values)
-            for col in ["open","high","low","close"]:
+            for col in ["open", "high", "low", "close"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
             df["datetime"] = pd.to_datetime(df["datetime"])
             df.set_index("datetime", inplace=True)
@@ -306,7 +301,7 @@ def get_data(symbol):
     return pd.DataFrame()
 
 def get_live_price(symbol):
-    """Get the latest price right now (not candle close)."""
+    """Latest price right now (not candle close)."""
     url    = "https://api.twelvedata.com/price"
     params = {"symbol": symbol, "apikey": TWELVE_DATA_KEY}
     try:
@@ -378,24 +373,17 @@ def detect_signal(df):
 
 
 # =============================================================
-#  SIGNAL MESSAGE — uses LIVE price as entry, not candle close
+#  MESSAGES
 # =============================================================
 def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_candle):
     """
-    live_price      = current market price RIGHT NOW
-    candle_close    = price when flip candle closed (for SL/TP reference)
-    sl_from_candle  = SL based on candle close
-    tp_from_candle  = TP based on candle close
-
-    Entry shown = live_price (what you actually get when you open now)
-    SL/TP recalculated from live_price for accuracy
+    Entry = live price right now. SL distance comes from the Supertrend line
+    at the flip candle; SL/TP are re-anchored to the live entry price.
     """
     act    = "BUY" if direction == "long" else "SELL"
     em     = "🟢" if direction == "long" else "🔴"
     bar    = "🟩"*10 if direction == "long" else "🟥"*10
 
-    # Recalculate SL/TP from live entry price
-    # SL distance stays same as candle-based calculation
     sl_dist = abs(candle_close - sl_from_candle)
     if direction == "long":
         entry  = live_price
@@ -408,8 +396,8 @@ def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_c
 
     slp    = round(abs(entry - sl) * 10000, 1)
     tpp    = round(abs(tp - entry) * 10000, 1)
-    loss   = round(slp * 0.1 * LOT_SIZE * 100, 2)
-    prof   = round(tpp * 0.1 * LOT_SIZE * 100, 2)
+    loss   = round(slp * PIP_USD, 2)
+    prof   = round(tpp * PIP_USD, 2)
     now    = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
 
     return (
@@ -428,8 +416,7 @@ def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_c
         f"📊 RR: 1:{RR}\n\n"
         f"<i>✅ Paper trade logged automatically.</i>\n\n"
         f"{bar}"
-    ), entry, sl, tp   # return levels for paper trade
-
+    ), entry, sl, tp
 
 def status_msg(statuses):
     now = datetime.now(IST).strftime("%d %b  %I:%M %p IST")
@@ -440,7 +427,7 @@ def status_msg(statuses):
             f"{em} <b>{pair}</b>  —  No signal\n"
             f"   ST:{round(stv,5)}   Price:{round(price,5)}\n"
         )
-    lines.append("<i>Checking every 5 min. /status anytime.</i>")
+    lines.append("<i>Checking about every 5 min. /status anytime.</i>")
     return "\n".join(lines)
 
 def close_msg(pair, direction, entry, exit_px, pnl, pips, result, bal):
@@ -458,48 +445,60 @@ def close_msg(pair, direction, entry, exit_px, pnl, pips, result, bal):
         f"<b>Balance</b>   :  ${round(bal,2)}"
     )
 
-def eod_report():
-    d   = load()
+def _open_position_lines(d, extra=""):
+    """Shared block listing open positions (EOD / weekly reports)."""
+    out = []
+    for pair, t in d.get("open_trades", {}).items():
+        c = price_cache.get(pair)
+        if not c:
+            out.append(
+                f"\n<b>{pair}</b> — {t['direction'].upper()}\n"
+                f"  Entry : {round(t['entry'],5)}  SL : {round(t['sl'],5)}  TP : {round(t['tp'],5)}\n"
+                f"  (live price unavailable)"
+                + extra
+            )
+            continue
+        price   = c["price"]
+        dist_sl = round(abs(price-t["sl"])*10000, 1)
+        dist_tp = round(abs(price-t["tp"])*10000, 1)
+        pnl_p   = (price-t["entry"])*10000 if t["direction"] == "long" \
+                  else (t["entry"]-price)*10000
+        pnl_u   = round(pnl_p*PIP_USD, 2)
+        sign    = "+" if pnl_u >= 0 else ""
+        col     = "🟢 GREEN" if c["color"] == "GREEN" else "🔴 RED"
+        out.append(
+            f"\n<b>{pair}</b> — {t['direction'].upper()}\n"
+            f"  Entry      :  {round(t['entry'],5)}\n"
+            f"  Current    :  {round(price,     5)}\n"
+            f"  Dist to SL :  {dist_sl} pips\n"
+            f"  Dist to TP :  {dist_tp} pips\n"
+            f"  Supertrend :  {col}\n"
+            f"  Unrealised :  {sign}{pnl_u} USD"
+            + extra
+        )
+    return out
+
+def eod_report(d):
     now = datetime.now(IST)
     ts  = now.strftime("%Y-%m-%d")
     dl  = now.strftime("%d %b %Y")
-    ct  = [t for t in d.get("closed_trades",[]) if t.get("closed_at","").startswith(ts)]
-    tp_ = sum(t.get("pnl_usd",0) for t in ct)
+    ct  = [t for t in d.get("closed_trades", []) if t.get("closed_at", "").startswith(ts)]
+    tp_ = sum(t.get("pnl_usd", 0) for t in ct)
     cap = d.get("capital",   PAPER_CAPITAL)
     pnl = d.get("total_pnl", 0.0)
     ret = round(((cap-PAPER_CAPITAL)/PAPER_CAPITAL)*100, 2)
     lines = [f"🌙 <b>EOD REPORT — {dl}</b>\n", "─── OPEN POSITIONS ───"]
-    for pair, t in d.get("open_trades",{}).items():
-        c = price_cache.get(pair)
-        if c:
-            price   = c["price"]
-            dist_sl = round(abs(price-t["sl"])*10000,1)
-            dist_tp = round(abs(price-t["tp"])*10000,1)
-            pnl_p   = (price-t["entry"])*10000 if t["direction"]=="long" \
-                      else (t["entry"]-price)*10000
-            pnl_u   = round(pnl_p*0.10,2)
-            sign    = "+" if pnl_u>=0 else ""
-            col     = "🟢 GREEN" if c["color"]=="GREEN" else "🔴 RED"
-            lines.append(
-                f"\n<b>{pair}</b> — {t['direction'].upper()}\n"
-                f"  Entry      :  {round(t['entry'],5)}\n"
-                f"  Current    :  {round(price,     5)}\n"
-                f"  Dist to SL :  {dist_sl} pips\n"
-                f"  Dist to TP :  {dist_tp} pips\n"
-                f"  Supertrend :  {col}\n"
-                f"  Unrealised :  {sign}{pnl_u} USD"
-            )
-    if len(lines) == 2:
-        lines.append("No open positions tonight.")
+    pos = _open_position_lines(d)
+    lines.extend(pos if pos else ["No open positions tonight."])
     lines.append("\n─── CLOSED TODAY ───")
     if ct:
         for t in ct:
-            s="+" if t.get("pnl_usd",0)>=0 else ""
-            e="✅" if "TP" in t.get("result","") else "❌"
+            s = "+" if t.get("pnl_usd", 0) >= 0 else ""
+            e = "✅" if "TP" in t.get("result", "") else "❌"
             lines.append(f"{e} {t['pair']} {t['direction'].upper()} → {s}{t.get('pnl_usd',0)} USD")
     else:
         lines.append("No trades closed today.")
-    s1="+" if tp_>=0 else ""; s2="+" if pnl>=0 else ""; s3="+" if ret>=0 else ""
+    s1 = "+" if tp_ >= 0 else ""; s2 = "+" if pnl >= 0 else ""; s3 = "+" if ret >= 0 else ""
     lines.append(
         f"\n─── ACCOUNT ───\n"
         f"Start: ${PAPER_CAPITAL}  Now: ${round(cap,2)}\n"
@@ -508,12 +507,7 @@ def eod_report():
     )
     send_msg("\n".join(lines))
 
-
-# =============================================================
-#  WEEKLY CLOSE REPORT — Saturday 2:30 AM IST = Friday 21:00 UTC
-# =============================================================
-def weekly_close_report():
-    d   = load()
+def weekly_close_report(d):
     now = datetime.now(IST)
     dl  = now.strftime("%d %b %Y")
     cap = d.get("capital",   PAPER_CAPITAL)
@@ -521,49 +515,29 @@ def weekly_close_report():
     ret = round(((cap - PAPER_CAPITAL) / PAPER_CAPITAL) * 100, 2)
     ct  = d.get("closed_trades", [])
     week_ago    = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-    week_trades = [t for t in ct if t.get("closed_at","") >= week_ago]
-    week_pnl    = sum(t.get("pnl_usd",0) for t in week_trades)
-    week_wins   = len([t for t in week_trades if "TP" in t.get("result","")])
+    week_trades = [t for t in ct if t.get("closed_at", "") >= week_ago]
+    week_pnl    = sum(t.get("pnl_usd", 0) for t in week_trades)
+    week_wins   = len([t for t in week_trades if "TP" in t.get("result", "")])
     week_total  = len(week_trades)
     week_wr     = round(week_wins / week_total * 100, 1) if week_total > 0 else 0
 
     lines = [f"📅 <b>WEEKLY CLOSE — {dl}</b>\n"]
     lines.append("─── OPEN POSITIONS (carry over weekend) ───")
-    for pair, t in d.get("open_trades",{}).items():
-        c = price_cache.get(pair)
-        if c:
-            price   = c["price"]
-            dist_sl = round(abs(price-t["sl"])*10000,1)
-            dist_tp = round(abs(price-t["tp"])*10000,1)
-            pnl_p   = (price-t["entry"])*10000 if t["direction"]=="long" else (t["entry"]-price)*10000
-            pnl_u   = round(pnl_p*0.10,2)
-            sign    = "+" if pnl_u>=0 else ""
-            col     = "🟢 GREEN" if c["color"]=="GREEN" else "🔴 RED"
-            lines.append(
-                f"\n<b>{pair}</b> — {t['direction'].upper()}\n"
-                f"  Entry      :  {round(t['entry'],5)}\n"
-                f"  Current    :  {round(price,5)}\n"
-                f"  Dist to SL :  {dist_sl} pips\n"
-                f"  Dist to TP :  {dist_tp} pips\n"
-                f"  Supertrend :  {col}\n"
-                f"  Unrealised :  {sign}{pnl_u} USD\n"
-                f"  ⚠️ Gap risk over weekend"
-            )
-    if not d.get("open_trades"):
-        lines.append("No open positions. Clean into weekend ✅")
+    pos = _open_position_lines(d, extra="\n  ⚠️ Gap risk over weekend")
+    lines.extend(pos if pos else ["No open positions. Clean into weekend ✅"])
 
     lines.append("\n─── THIS WEEK ───")
     if week_trades:
         for t in week_trades:
-            s = "+" if t.get("pnl_usd",0)>=0 else ""
-            e = "✅" if "TP" in t.get("result","") else "❌"
+            s = "+" if t.get("pnl_usd", 0) >= 0 else ""
+            e = "✅" if "TP" in t.get("result", "") else "❌"
             lines.append(f"{e} {t['pair']} {t['direction'].upper()} → {s}{t.get('pnl_usd',0)} USD")
-        s_w = "+" if week_pnl>=0 else ""
+        s_w = "+" if week_pnl >= 0 else ""
         lines.append(f"\nWeek trades : {week_total}  Wins: {week_wins} ({week_wr}%)  P&L: {s_w}{round(week_pnl,2)} USD")
     else:
         lines.append("No trades closed this week.")
 
-    s1="+" if pnl>=0 else ""; s2="+" if ret>=0 else ""
+    s1 = "+" if pnl >= 0 else ""; s2 = "+" if ret >= 0 else ""
     lines.append(
         f"\n─── ACCOUNT ───\n"
         f"Balance : ${round(cap,2)}  P&L: {s1}{round(pnl,2)} USD  Return: {s2}{ret}%\n\n"
@@ -572,19 +546,13 @@ def weekly_close_report():
     send_msg("\n".join(lines))
     print("[Weekly Close Report Sent]")
 
-
-# =============================================================
-#  WEEKLY OPEN MESSAGE — Monday 6:30 AM IST = Monday 01:00 UTC
-# =============================================================
-def weekly_open_message():
-    d   = load()
+def weekly_open_message(d):
     now = datetime.now(IST)
     dl  = now.strftime("%d %b %Y")
     cap = d.get("capital", PAPER_CAPITAL)
     open_trades = d.get("open_trades", {})
 
     lines = [f"🌅 <b>MARKET OPEN — {dl} (Monday)</b>\n", "Forex is live. Bot is watching.\n"]
-
     if open_trades:
         lines.append("─── CARRIED POSITIONS ───")
         for pair, t in open_trades.items():
@@ -595,27 +563,11 @@ def weekly_open_message():
             )
     else:
         lines.append("No carry-over positions. Fresh week ✅")
-
     lines.append(f"\nBalance : ${round(cap,2)}\n\nSignals active. First status arriving shortly.")
     send_msg("\n".join(lines))
     print("[Weekly Open Message Sent]")
 
-
-# =============================================================
-#  MONTHLY REPORT — last trading day of month
-# =============================================================
-def check_monthly_report():
-    import calendar
-    now       = datetime.now(IST)
-    last_day  = calendar.monthrange(now.year, now.month)[1]
-    last_date = datetime(now.year, now.month, last_day, tzinfo=IST)
-    while last_date.weekday() >= 5:
-        last_date -= timedelta(days=1)
-    if now.date() == last_date.date():
-        monthly_report()
-
-def monthly_report():
-    d   = load()
+def monthly_report(d):
     now = datetime.now(IST)
     dl  = now.strftime("%b %Y")
     cap = d.get("capital",   PAPER_CAPITAL)
@@ -623,33 +575,33 @@ def monthly_report():
     ret = round(((cap - PAPER_CAPITAL) / PAPER_CAPITAL) * 100, 2)
     ct  = d.get("closed_trades", [])
     month_str    = now.strftime("%Y-%m")
-    month_trades = [t for t in ct if t.get("closed_at","").startswith(month_str)]
-    month_pnl    = sum(t.get("pnl_usd",0) for t in month_trades)
-    month_wins   = len([t for t in month_trades if "TP" in t.get("result","")])
+    month_trades = [t for t in ct if t.get("closed_at", "").startswith(month_str)]
+    month_pnl    = sum(t.get("pnl_usd", 0) for t in month_trades)
+    month_wins   = len([t for t in month_trades if "TP" in t.get("result", "")])
     month_total  = len(month_trades)
-    month_wr     = round(month_wins/month_total*100,1) if month_total>0 else 0
-    gross_profit = sum(t.get("pnl_usd",0) for t in month_trades if t.get("pnl_usd",0)>0)
-    gross_loss   = abs(sum(t.get("pnl_usd",0) for t in month_trades if t.get("pnl_usd",0)<0))
-    month_pf     = round(gross_profit/gross_loss,2) if gross_loss>0 else 0.0
+    month_wr     = round(month_wins/month_total*100, 1) if month_total > 0 else 0
+    gross_profit = sum(t.get("pnl_usd", 0) for t in month_trades if t.get("pnl_usd", 0) > 0)
+    gross_loss   = abs(sum(t.get("pnl_usd", 0) for t in month_trades if t.get("pnl_usd", 0) < 0))
+    month_pf     = round(gross_profit/gross_loss, 2) if gross_loss > 0 else 0.0
 
     lines = [f"📊 <b>MONTHLY REPORT — {dl}</b>\n"]
-    lines.append("─── THIS MONTH\'S TRADES ───")
+    lines.append("─── THIS MONTH'S TRADES ───")
     if month_trades:
         for t in month_trades:
-            s = "+" if t.get("pnl_usd",0)>=0 else ""
-            e = "✅" if "TP" in t.get("result","") else "❌"
-            d_str = t.get("closed_at","")[:10]
+            s = "+" if t.get("pnl_usd", 0) >= 0 else ""
+            e = "✅" if "TP" in t.get("result", "") else "❌"
+            d_str = t.get("closed_at", "")[:10]
             lines.append(f"{e} {d_str}  {t['pair']} {t['direction'].upper()} → {s}{t.get('pnl_usd',0)} USD")
     else:
         lines.append("No completed trades this month.")
 
-    s_m="+" if month_pnl>=0 else ""
+    s_m = "+" if month_pnl >= 0 else ""
     lines.append(
         f"\n─── MONTH SUMMARY ───\n"
         f"Trades : {month_total}  Wins: {month_wins} ({month_wr}%)  PF: {month_pf}\n"
         f"Month P&L : {s_m}{round(month_pnl,2)} USD"
     )
-    s1="+" if pnl>=0 else ""; s2="+" if ret>=0 else ""
+    s1 = "+" if pnl >= 0 else ""; s2 = "+" if ret >= 0 else ""
     lines.append(
         f"\n─── OVERALL ───\n"
         f"Balance: ${round(cap,2)}  Total P&L: {s1}{round(pnl,2)} USD  Return: {s2}{ret}%"
@@ -658,179 +610,259 @@ def monthly_report():
     print("[Monthly Report Sent]")
 
 
+# =============================================================
+#  SCHEDULED REPORTS — fire in a time WINDOW, once per period
+#  (GitHub may start a run late, so exact-minute triggers would be missed)
+# =============================================================
+def last_trading_day(year, month):
+    dt = datetime(year, month, calendar.monthrange(year, month)[1])
+    while dt.weekday() >= 5:
+        dt -= timedelta(days=1)
+    return dt.date()
+
+def reports_due(meta, now_ist):
+    """Names of reports that should be sent now and haven't been yet."""
+    today = now_ist.strftime("%Y-%m-%d")
+    mins  = now_ist.hour * 60 + now_ist.minute
+    wd    = now_ist.weekday()                    # Mon=0 … Sun=6
+    due   = []
+    # EOD — weekdays from 10:30 PM IST (London close)
+    if wd < 5 and mins >= 22*60 + 30 and meta.get("last_eod") != today:
+        due.append("eod")
+    # Weekly close — Saturday from 2:30 AM IST (Friday 21:00 UTC)
+    if wd == 5 and mins >= 2*60 + 30 and meta.get("last_weekly_close") != today:
+        due.append("weekly_close")
+    # Weekly open — Monday from 6:30 AM IST
+    if wd == 0 and mins >= 6*60 + 30 and meta.get("last_weekly_open") != today:
+        due.append("weekly_open")
+    # Monthly — last trading day of the month from 10:35 PM IST
+    month = now_ist.strftime("%Y-%m")
+    if (now_ist.date() == last_trading_day(now_ist.year, now_ist.month)
+            and mins >= 22*60 + 35 and meta.get("last_monthly") != month):
+        due.append("monthly")
+    return due
+
+def send_reports(d, due, now_ist):
+    meta  = d["meta"]
+    today = now_ist.strftime("%Y-%m-%d")
+    for name in due:
+        if name == "eod":
+            eod_report(d);           meta["last_eod"] = today
+        elif name == "weekly_close":
+            weekly_close_report(d);  meta["last_weekly_close"] = today
+        elif name == "weekly_open":
+            weekly_open_message(d);  meta["last_weekly_open"] = today
+        elif name == "monthly":
+            monthly_report(d);       meta["last_monthly"] = now_ist.strftime("%Y-%m")
+
 
 # =============================================================
-#  EXIT CHECK
+#  MARKET HOURS  (forex: Sunday 22:00 UTC → Friday 22:00 UTC)
 # =============================================================
-def check_exits():
-    d = load()
-    for pair, t in list(d.get("open_trades",{}).items()):
-        c     = price_cache.get(pair)
-        price = c["price"] if c else None
-        if price is None:
-            lp = get_live_price(PAIRS.get(pair,""))
-            if lp:
-                price = lp
-        if price is None:
+def market_open(now_utc):
+    wd = now_utc.weekday()
+    if wd == 5:                         return False   # Saturday
+    if wd == 4 and now_utc.hour >= 22:  return False   # Friday after close
+    if wd == 6 and now_utc.hour < 22:   return False   # Sunday before open
+    return True
+
+
+# =============================================================
+#  EXIT CHECK — walks every candle since entry (HIGH / LOW)
+# =============================================================
+def _hit(t, hi, lo):
+    """Which level did this price range touch? SL wins if both (conservative)."""
+    if t["direction"] == "long":
+        hit_sl = lo <= t["sl"]
+        hit_tp = hi >= t["tp"]
+    else:
+        hit_sl = hi >= t["sl"]
+        hit_tp = lo <= t["tp"]
+    if hit_sl: return "SL HIT"
+    if hit_tp: return "TP HIT"
+    return None
+
+def find_exit(t, df):
+    """
+    Candles that started AFTER the entry hour are fully usable (high/low).
+    The entry candle itself only counts at its close, because its high/low
+    may have happened before we entered.
+    """
+    opened = datetime.fromisoformat(t["opened_at"]).astimezone(timezone.utc)
+    entry_hour = opened.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+
+    ranges = []
+    if entry_hour in df.index and entry_hour != df.index[-1]:
+        c = float(df.loc[entry_hour, "close"])          # entry candle already closed
+        ranges.append((c, c))
+    for ts, row in df[df.index > entry_hour].iterrows():
+        ranges.append((float(row["high"]), float(row["low"])))
+    if entry_hour == df.index[-1]:                       # entry candle still forming
+        c = float(df["close"].iloc[-1])
+        ranges.append((c, c))
+
+    for hi, lo in ranges:
+        res = _hit(t, hi, lo)
+        if res:
+            return res
+    return None
+
+def check_exits(d, dfs):
+    for pair, t in list(d.get("open_trades", {}).items()):
+        df = dfs.get(pair)
+        if df is None or df.empty:
             continue
         try:
-            hit_tp = (t["direction"]=="long"  and price>=t["tp"]) or \
-                     (t["direction"]=="short" and price<=t["tp"])
-            hit_sl = (t["direction"]=="long"  and price<=t["sl"]) or \
-                     (t["direction"]=="short" and price>=t["sl"])
-            if not hit_tp and not hit_sl:
+            res = find_exit(t, df)
+            if not res:
                 continue
-            ep   = t["tp"] if hit_tp else t["sl"]
-            res  = "TP HIT" if hit_tp else "SL HIT"
-            pips = (ep-t["entry"])*10000 if t["direction"]=="long" \
+            ep   = t["tp"] if res == "TP HIT" else t["sl"]
+            pips = (ep-t["entry"])*10000 if t["direction"] == "long" \
                    else (t["entry"]-ep)*10000
-            pnl  = round(pips*0.10, 2)
+            pnl  = round(pips*PIP_USD, 2)
             d["capital"]   = d.get("capital",   PAPER_CAPITAL) + pnl
             d["total_pnl"] = d.get("total_pnl", 0.0)          + pnl
-            d.setdefault("closed_trades",[]).append({
-                **t, "exit_price":ep, "pnl_usd":pnl,
-                "pnl_pips":round(pips,1), "result":res,
-                "closed_at":datetime.now(IST).isoformat()
+            d.setdefault("closed_trades", []).append({
+                **t, "exit_price": ep, "pnl_usd": pnl,
+                "pnl_pips": round(pips, 1), "result": res,
+                "closed_at": datetime.now(IST).isoformat()
             })
             del d["open_trades"][pair]
-            save(d)
-            send_msg(close_msg(pair,t["direction"],t["entry"],
-                               ep,pnl,pips,res,d["capital"]))
+            send_msg(close_msg(pair, t["direction"], t["entry"],
+                               ep, pnl, pips, res, d["capital"]))
             print(f"[Closed] {pair} {res} PnL:{pnl}")
         except Exception as e:
             print(f"[Exit Error] {pair}: {e}")
 
 
 # =============================================================
-#  MAIN CHECK — every 5 minutes
+#  SIGNAL SCAN
 # =============================================================
-# Track last hourly status send time
-last_status_sent = {"time": None}
-
-def check_all():
-    global price_cache
-    now_ist = datetime.now(IST)
-    print(f"\n[{now_ist.strftime('%d %b %H:%M IST')}] CHECK")
-
-    check_exits()
-
-    d        = load()
+def scan_signals(d, dfs):
+    meta     = d["meta"]
+    last_sig = meta.setdefault("last_signal", {})
     statuses = []
 
-    for pair, sym in PAIRS.items():
-        df = calc_supertrend(get_data(sym))
-        if df.empty:
-            print(f"  [Skip] {pair}")
-            continue
-        try:
-            cp  = float(df["close"].iloc[-1])
-            stv = float(df["st"].iloc[-2])  if "st"  in df.columns else 0.0
-            cd  = float(df["dir"].iloc[-2]) if "dir" in df.columns else 0.0
-            col = "GREEN" if cd == -1 else "RED"
-            price_cache[pair] = {"price":cp, "st":stv, "color":col}
-        except Exception as e:
-            print(f"  [Cache Error] {e}"); continue
+    for pair, df in dfs.items():
+        sym = PAIRS[pair]
+        cp  = price_cache[pair]["price"]
+        stv = price_cache[pair]["st"]
+        col = price_cache[pair]["color"]
 
         sig, candle_close, candle_sl, candle_tp, ctime = detect_signal(df)
 
-        if sig is None:
+        if sig is None or last_sig.get(pair) == ctime or pair in d.get("open_trades", {}):
             statuses.append((pair, col, stv, cp))
             continue
 
-        if last_signal.get(pair) == ctime:
-            statuses.append((pair, col, stv, cp))
-            continue
-
-        if pair in d.get("open_trades",{}):
-            statuses.append((pair, col, stv, cp))
-            continue
-
-        # Get LIVE price for accurate entry
         live_price = get_live_price(sym)
         if live_price is None:
-            live_price = candle_close  # fallback to candle close
-            print(f"  [Warning] Could not get live price, using candle close")
+            live_price = candle_close
+            print("  [Warning] Could not get live price, using candle close")
 
         print(f"  {pair}: *** {sig.upper()} ***")
         print(f"  Candle close: {candle_close:.5f}  Live price: {live_price:.5f}")
 
-        # Build signal message with live price
         msg, entry, sl, tp = sig_msg(
             pair, sig, live_price, candle_close, candle_sl, candle_tp)
 
-        last_signal[pair] = ctime
+        # Record the trade BEFORE messaging so a failed send can never
+        # cause a duplicate entry on the next run.
+        last_sig[pair] = ctime
+        d["open_trades"][pair] = {
+            "pair": pair, "direction": sig,
+            "entry": entry, "sl": sl, "tp": tp,
+            "candle_close": candle_close,
+            "opened_at": datetime.now(IST).isoformat()
+        }
         send_msg(msg)
 
-        # Save paper trade with LIVE entry price
-        d = load()
-        d["open_trades"][pair] = {
-            "pair":pair, "direction":sig,
-            "entry":entry, "sl":sl, "tp":tp,
-            "candle_close":candle_close,
-            "opened_at":datetime.now(IST).isoformat()
-        }
-        save(d)
-        time.sleep(1)
+    return statuses
 
-    # Send status update once per hour during trading hours
-    is_trading = NO_SIG_START <= now_ist.hour < NO_SIG_END
-    if statuses and is_trading:
-        last = last_status_sent["time"]
-        now_min = now_ist.hour * 60 + now_ist.minute
-        if last is None or (now_min - last) >= 60:
-            send_msg(status_msg(statuses))
-            last_status_sent["time"] = now_min
-            print("  [Status sent]")
+def maybe_send_status(meta, statuses, now_ist):
+    """Hourly status during trading hours (55-min gap tolerates run jitter)."""
+    if not statuses or not (NO_SIG_START <= now_ist.hour < NO_SIG_END):
+        return
+    last = meta.get("last_status_at")
+    if last:
+        try:
+            mins = (now_ist - datetime.fromisoformat(last)).total_seconds() / 60
+            if mins < 55:
+                return
+        except ValueError:
+            pass
+    send_msg(status_msg(statuses))
+    meta["last_status_at"] = now_ist.isoformat()
+    print("  [Status sent]")
 
 
 # =============================================================
-#  STARTUP
+#  ONE RUN
 # =============================================================
+def run(d, now_utc, now_ist):
+    meta     = d["meta"]
+    commands = fetch_commands(meta)
+    due      = reports_due(meta, now_ist)
+    is_open  = market_open(now_utc)
+
+    print(f"[{now_ist.strftime('%d %b %H:%M IST')}] market_open={is_open} "
+          f"commands={commands} reports_due={due}")
+
+    need_data = is_open \
+        or any(c in DATA_CMDS for c in commands) \
+        or (due and d["open_trades"])
+
+    dfs = {}
+    price_cache.clear()
+    if need_data:
+        for pair, sym in PAIRS.items():
+            df = calc_supertrend(get_data(sym))
+            if df.empty or "st" not in df.columns:
+                print(f"  [Skip] {pair}")
+                continue
+            try:
+                price_cache[pair] = {
+                    "price": float(df["close"].iloc[-1]),
+                    "st":    float(df["st"].iloc[-2]),
+                    "color": "GREEN" if float(df["dir"].iloc[-2]) == -1 else "RED",
+                }
+                dfs[pair] = df
+            except Exception as e:
+                print(f"  [Cache Error] {pair}: {e}")
+
+    if is_open and dfs:
+        check_exits(d, dfs)
+        statuses = scan_signals(d, dfs)
+        maybe_send_status(meta, statuses, now_ist)
+
+    for cmd in commands:
+        reply_to(cmd, d)
+
+    if due:
+        send_reports(d, due, now_ist)
+
+
+def main():
+    missing = [n for n, v in (("TELEGRAM_TOKEN", TELEGRAM_TOKEN),
+                              ("CHAT_ID", CHAT_ID),
+                              ("TWELVE_DATA_KEY", TWELVE_DATA_KEY)) if not v]
+    if missing:
+        print(f"ERROR: missing secrets: {', '.join(missing)}")
+        sys.exit(1)
+
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+
+    d      = load()
+    before = json.dumps(d, sort_keys=True)
+    try:
+        run(d, now_utc, now_ist)
+    finally:
+        # Save even if something above crashed, but only when it changed
+        # (keeps the repo history free of empty commits).
+        if json.dumps(d, sort_keys=True) != before:
+            save(d)
+
+
 if __name__ == "__main__":
-    print("="*55)
-    print("  SUPERTREND BOT — Fixed Version")
-    print("  Checks every 5 min | Live price entry")
-    print("="*55)
-
-    if not TELEGRAM_TOKEN: print("ERROR: TELEGRAM_TOKEN missing"); exit()
-    if not CHAT_ID:         print("ERROR: CHAT_ID missing");        exit()
-    if not TWELVE_DATA_KEY: print("ERROR: TWELVE_DATA_KEY missing"); exit()
-
-    d = load()
-    send_msg(
-        "🤖 <b>SUPERTREND BOT — UPDATED</b>\n\n"
-        f"<b>Pairs</b>    :  EUR/USD + GBP/USD\n"
-        f"<b>ATR</b>      :  {ATR_PERIOD}  "
-        f"<b>Factor</b>  :  {ST_FACTOR}  "
-        f"<b>RR</b>      :  1:{RR}\n"
-        f"<b>Capital</b>  :  ${round(d.get('capital',PAPER_CAPITAL),2)} (paper)\n\n"
-        f"✅ <b>Checks every 5 minutes</b> (faster signal detection)\n"
-        f"✅ <b>Live price as entry</b> (no more stale prices)\n"
-        f"✅ Status once per hour during trading hours\n"
-        f"✅ EOD report at 10:30 PM IST (London Close)\n\n"
-        "Send /status /balance /trades /help anytime."
-    )
-
-    threading.Thread(target=handle_commands, daemon=True).start()
-
-    check_all()
-
-    # Check every 5 minutes
-    schedule.every(5).minutes.do(check_all)
-
-    # EOD daily at London Close = 10:30 PM IST = 17:00 UTC
-    schedule.every().day.at("17:00").do(eod_report)
-
-    # Weekly close — Saturday 2:30 AM IST = Friday 21:00 UTC
-    schedule.every().friday.at("21:00").do(weekly_close_report)
-
-    # Weekly open — Monday 6:30 AM IST = Monday 01:00 UTC
-    schedule.every().monday.at("01:00").do(weekly_open_message)
-
-    # Monthly report — runs daily at 17:00 UTC, fires only on last trading day
-    schedule.every().day.at("17:05").do(check_monthly_report)
-
-    print("\nRunning — checks every 5 minutes\n")
-    while True:
-        schedule.run_pending()
-        time.sleep(10)
+    main()

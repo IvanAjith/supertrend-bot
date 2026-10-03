@@ -85,7 +85,7 @@ if inTrade and confirmed and bar_index > entryBar
         closeMsg += "\nP&L   : " + sgn + "$" + str.tostring(math.round(math.abs(pnl), 2)) + "  (" + sgn + str.tostring(math.round(math.abs(pips), 1)) + " pips)"
         closeMsg += "\nBalance : $" + str.tostring(math.round(balance, 2))
         exitAbove = (side == 1 and isTp) or (side == -1 and not isTp)
-        label.new(bar_index, exitPx, closeMsg, style = exitAbove ? label.style_label_down : label.style_label_up, color = isTp ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+        label.new(bar_index, exitPx, closeMsg, style = exitAbove ? label.style_label_down : label.style_label_up, color = isTp ? color.green : color.red, textcolor = color.white, size = size.normal, textalign = text.align_left)
         closedNow := true
         inTrade   := false
 
@@ -112,7 +112,7 @@ if not inTrade and confirmed and inRange and (flipUp or flipDn)
     lnEntry  := line.new(bar_index, entryPx, bar_index + 1, entryPx, color = color.gray,  style = line.style_dashed, width = 1)
     lnSl     := line.new(bar_index, slPx,    bar_index + 1, slPx,    color = color.red,   width = 1)
     lnTp     := line.new(bar_index, tpPx,    bar_index + 1, tpPx,    color = color.green, width = 1)
-    label.new(bar_index, isBuy ? low : high, openMsg, style = isBuy ? label.style_label_up : label.style_label_down, color = isBuy ? color.green : color.red, textcolor = color.white, size = size.normal, text_halign = text.align_left)
+    label.new(bar_index, isBuy ? low : high, openMsg, style = isBuy ? label.style_label_up : label.style_label_down, color = isBuy ? color.green : color.red, textcolor = color.white, size = size.normal, textalign = text.align_left)
     openedNow := true
 
 // keep the entry / stop / target lines growing while the trade is open

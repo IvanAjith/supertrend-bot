@@ -4,6 +4,7 @@
   "closed_trades": [],
   "total_pnl": 0.0,
   "meta": {
-    "last_weekly_close": "2026-10-03"
+    "last_weekly_close": "2026-10-03",
+    "last_update_id": 419874225
   }
 }

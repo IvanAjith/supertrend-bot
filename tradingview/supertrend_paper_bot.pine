@@ -12,8 +12,8 @@ G1 = "Strategy — same numbers as the bot"
 G2 = "Paper account"
 
 atrLen    = input.int(13,     "ATR period",        minval = 1,   group = G1)
-factor    = input.float(4.11, "Supertrend factor", minval = 0.1, step = 0.01, group = G1)
-rr        = input.float(1.7,  "Reward : Risk",     minval = 0.1, step = 0.1,  group = G1)
+factor    = input.float(4.5,  "Supertrend factor", minval = 0.1, step = 0.01, group = G1)
+rr        = input.float(1.5,  "Reward : Risk",     minval = 0.1, step = 0.1,  group = G1)
 fromDate  = input.time(timestamp("03 Oct 2026 00:00 +0530"), "Start paper trading from (set earlier to backtest)", group = G1)
 
 startCap  = input.float(300.0, "Paper capital ($)", minval = 1, group = G2)

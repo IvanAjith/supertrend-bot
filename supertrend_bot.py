@@ -10,10 +10,12 @@ How it runs
     4. sends scheduled reports (hourly status, EOD, weekly, monthly)
     5. saves state back to paper_trades.json (the workflow commits it)
 
-Strategy (unchanged)
-  Pairs     : EUR/USD, GBP/USD      Timeframe : 1H candles
-  Settings  : ATR 13, Factor 4.11, RR 1.7
+Strategy (Oct 2026 settings — backtested in TradingView and on 2012–2022 data)
+  Pairs     : GBP/USD               Timeframe : 1H candles
+  Settings  : ATR 13, Factor 4.5, RR 1.5
   Capital   : $300 paper account, 0.01 lot ($0.10 per pip)
+  Same numbers as tradingview/supertrend_paper_bot.pine and
+  tradingview/supertrend_strategy.pine — keep all three in sync.
 
 What changed vs the Railway version
   - No endless loop / scheduler: one pass per run, state lives in the repo
@@ -42,16 +44,19 @@ CHAT_ID         = os.environ.get("CHAT_ID",         "")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 
 ATR_PERIOD    = 13
-ST_FACTOR     = 4.11
-RR            = 1.7
+ST_FACTOR     = 4.5
+RR            = 1.5
 PAPER_CAPITAL = 300.0
 LOT_SIZE      = 0.01
 PIP_USD       = 0.10      # $ per pip at 0.01 lot on a USD-quoted pair
 
 PAIRS = {
-    "EUR/USD": "EUR/USD",
     "GBP/USD": "GBP/USD",
 }
+
+# Candles fetched per run. Supertrend depends on the whole price path, so a
+# long history keeps the bot's line identical to TradingView's.
+CANDLES = 500
 
 IST          = timezone(timedelta(hours=5, minutes=30))
 NO_SIG_START = 13          # hourly status window (IST hours)
@@ -171,7 +176,8 @@ def cmd_status(d):
     lines = [
         "✅ <b>BOT IS ALIVE</b>\n",
         f"<b>Time</b>   :  {now}",
-        f"<b>Pairs</b>  :  EUR/USD + GBP/USD",
+        f"<b>Pairs</b>  :  {' + '.join(PAIRS)}",
+        f"<b>Setup</b>  :  ATR {ATR_PERIOD} · Factor {ST_FACTOR} · RR 1:{RR}",
         f"<b>Check</b>  :  About every 5 minutes\n",
         "─── SUPERTREND STATUS ───"
     ]
@@ -289,7 +295,7 @@ def get_data(symbol):
     params = {
         "symbol":     symbol,
         "interval":   "1h",
-        "outputsize": 100,
+        "outputsize": CANDLES,
         "timezone":   "UTC",       # candle timestamps in UTC (exit logic relies on it)
         "apikey":     TWELVE_DATA_KEY,
         "format":     "JSON"

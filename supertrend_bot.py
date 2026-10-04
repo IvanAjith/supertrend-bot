@@ -11,7 +11,7 @@ How it runs
     5. saves state back to paper_trades.json (the workflow commits it)
 
 Strategy (Oct 2026 settings — backtested in TradingView and on 2012–2022 data)
-  Pairs     : GBP/USD               Timeframe : 1H candles
+  Pairs     : GBP/USD, EUR/USD      Timeframe : 1H candles
   Settings  : ATR 13, Factor 4.5, RR 1.5, no filters  (strategy_settings.json)
   Costs     : 1.5 pips per trade deducted from every result
   Capital   : $300 paper account, 0.01 lot ($0.10 per pip)
@@ -74,6 +74,7 @@ HISTORY_PAGES = 3         # x 5,000 hourly candles (~2.5 years) for the monthly 
 
 PAIRS = {
     "GBP/USD": "GBP/USD",
+    "EUR/USD": "EUR/USD",
 }
 
 # Candles fetched per run. Supertrend, ADX and EMA depend on the whole price
@@ -194,7 +195,7 @@ def reply_to(cmd, d):
     else:                           send_msg("❓ Unknown command. Send /help")
 
 # Bump this when the guide text changes: the bot then sends the new guide once.
-GUIDE_VERSION = 1
+GUIDE_VERSION = 2
 
 def guide_parts():
     """The full bot guide, split into Telegram-sized messages (HTML mode)."""
@@ -202,10 +203,10 @@ def guide_parts():
     part1 = (
         "📘 <b>SUPERTREND PAPER BOT — GUIDE (1/2)</b>\n\n"
         "<b>What it does</b>\n"
-        "Paper-trades GBP/USD on 1-hour candles and reports here. No real money. "
+        f"Paper-trades {' and '.join(PAIRS)} on 1-hour candles and reports here. No real money. "
         "Runs free on GitHub Actions, checking about every 5 minutes.\n\n"
         "<b>Settings</b>\n"
-        f"• Pair / timeframe : GBP/USD, 1H\n"
+        f"• Pairs / timeframe : {', '.join(PAIRS)} — 1H\n"
         f"• Supertrend : ATR {ATR_PERIOD}, factor {ST_FACTOR}\n"
         f"• Stop loss : at the Supertrend line\n"
         f"• Target : {RR}× the stop distance\n"
@@ -214,10 +215,10 @@ def guide_parts():
         f"• Size : {LOT_SIZE} lot (about ₹{PIP_USD * INR_PER_USD:.1f} per pip)\n"
         f"• Paper account : ${PAPER_CAPITAL:.0f} (about {inr(PAPER_CAPITAL)})\n"
         f"• Cost : {sp} pips taken off every result\n"
-        "• One trade at a time\n\n"
+        "• One trade at a time per pair\n\n"
         "<b>Signal rule</b>\n"
         "When the Supertrend changes colour on a closed 1H candle: green = BUY, red = SELL, "
-        "entered at the live price. A flip while a trade is open is ignored. About 3 trades a month.\n\n"
+        "entered at the live price. A flip while that pair has a trade open is ignored. About 3 trades a month per pair.\n\n"
         "<b>Automatic messages (IST)</b>\n"
         "• Signal — entry, stop, target, risk and reward in ₹, flip candle time to match on TradingView\n"
         "• Close — target/stop hit, P&amp;L in $ and ₹, result in R, journal note\n"
@@ -251,8 +252,8 @@ def guide_parts():
         "TradingView scripts.\n\n"
         "<b>Good to know</b>\n"
         "• Judge it after 3 months on profit factor (/balance, /month), not single trades.\n"
-        "• History: GBP/USD 2012–2022 profit factor ~1.25, ~60% of months profitable; "
-        "2025–2026 about break-even after costs.\n"
+        "• History, 2012–2022 after costs: GBP/USD profit factor ~1.2; EUR/USD ~0.9 (lost in 6 of "
+        "11 years). The review shows each pair separately and flags a pair that keeps losing.\n"
         "• Full trade records: paper_trades.json in your GitHub repo."
     )
     return [part1, part2]
@@ -447,7 +448,7 @@ def get_history(symbol, pages=HISTORY_PAGES):
             break
         frames.append(df)
         end = (df.index[0] - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        time.sleep(8)              # stay under the free plan's per-minute limit
+        time.sleep(10)             # free plan allows 8 requests a minute
     if not frames:
         return pd.DataFrame()
     h = pd.concat(frames).sort_index()
@@ -831,27 +832,36 @@ def _settings_table(s):
             f"   ADX filter        :  {'ON, ' + str(s['adx_min']) + '+' if s['use_adx_filter'] else 'off'}\n"
             f"   EMA filter        :  {'ON, EMA' + str(s['ema_len']) if s['use_ema_filter'] else 'off'}")
 
+def send_long(text, limit=3900):
+    """Telegram caps messages at 4,096 characters — split on line breaks."""
+    chunk = ""
+    for line in text.split("\n"):
+        if len(chunk) + len(line) + 1 > limit:
+            send_msg(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk.strip():
+        send_msg(chunk)
+
 def learning_review(d):
-    """Lessons from the journal + re-test on ~2.5 years of candles. One message per pair."""
-    for pair, sym in PAIRS.items():
-        try:
-            hist = get_history(sym)
-            lines, proposal = L.review(
-                [t for t in d.get("closed_trades", []) if t.get("pair") == pair],
-                hist, S, SPREAD_PIPS)
-        except Exception as e:
-            print(f"[Learn Error] {pair}: {e}")
-            send_msg(f"⚠️ Learning review failed for {pair}: {e}")
-            continue
-        LEARN_META["last_review"] = datetime.now(IST).isoformat(timespec="minutes")
-        if proposal:
-            LEARN_META["pending"] = proposal
-            if AUTO_APPLY:
-                lines.append("\n" + apply_pending("auto-applied by monthly review"))
-            else:
-                lines.append("\nReply /approve to switch, or /reject to keep the current settings.")
-        L.save_settings(S, LEARN_META)
-        send_msg(f"<b>{pair}</b>\n" + "\n".join(lines))
+    """Lessons from the journal (all pairs) + one re-test across all pairs.
+    The settings are shared, so a change must work for every pair together."""
+    try:
+        histories = {pair: get_history(sym) for pair, sym in PAIRS.items()}
+        lines, proposal = L.review(d.get("closed_trades", []), histories, S, SPREAD_PIPS)
+    except Exception as e:
+        print(f"[Learn Error] {e}")
+        send_msg(f"⚠️ Learning review failed: {e}")
+        return
+    LEARN_META["last_review"] = datetime.now(IST).isoformat(timespec="minutes")
+    if proposal:
+        LEARN_META["pending"] = proposal
+        if AUTO_APPLY:
+            lines.append("\n" + apply_pending("auto-applied by monthly review"))
+        else:
+            lines.append("\nReply /approve to switch, or /reject to keep the current settings.")
+    L.save_settings(S, LEARN_META)
+    send_long("\n".join(lines))
 
 def apply_pending(reason):
     p = LEARN_META.get("pending")

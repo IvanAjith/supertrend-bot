@@ -1,12 +1,12 @@
 # Supertrend paper-trading bot
 
-Paper-trades GBP/USD on 1H candles (Supertrend ATR 13, factor 4.5, RR 1:1.5, $300 account,
+Paper-trades GBP/USD and EUR/USD on 1H candles (Supertrend ATR 13, factor 4.5, RR 1:1.5, $300 account,
 0.01 lot) and reports to Telegram. Runs free on GitHub Actions.
 
 ## Settings — keep these three files in sync
 | Setting | Value | Where |
 |---|---|---|
-| Pair | GBP/USD | `PAIRS` in `supertrend_bot.py` |
+| Pairs | GBP/USD, EUR/USD (one trade at a time per pair) | `PAIRS` in `supertrend_bot.py` |
 | Timeframe | 1H | (fixed) |
 | ATR period | 13 | `ATR_PERIOD` / Pine `atrLen` |
 | Supertrend factor | 4.5 | `ST_FACTOR` / Pine `factor` |
@@ -21,7 +21,15 @@ The bot reads ATR, factor, RR and filters from `strategy_settings.json` (the lea
 `tradingview/supertrend_paper_bot.pine` (indicator replica), `tradingview/supertrend_strategy.pine`
 (strategy for the TradingView Strategy Tester). If you change a number, change it everywhere.
 
-## Backtest summary (GBP/USD, 1H, factor 4.5, RR 1.5, 0.01 lot, about 1.5 pip cost)
+## Backtest summary (1H, factor 4.5, RR 1.5, 0.01 lot, about 1.5 pip cost, 2012 – Mar 2022)
+| Pair | Trades / month | Profit factor | Net | Losing years |
+|---|---|---|---|---|
+| GBP/USD | 3.2 | 1.19 | +40R | 2 of 11 |
+| EUR/USD | 3.4 | 0.90 | −24R | 6 of 11 |
+| Both | 6.6 | 1.04 | +16R | 6 of 11 |
+
+EUR/USD is included for paper trading to gather live evidence; the learning review shows each pair
+separately and flags a pair that loses in both halves of its re-test. Details for GBP/USD:
 On 2012–Mar 2022 hourly data (OANDA and broker data, cross-checked): profit factor about 1.25,
 about 3 trades a month, 45% winners, roughly 60% of months profitable. Average stop about 110 pips,
 so each trade risks about $11 at 0.01 lot. Results vary a lot by year (2017: −$117, 2018: +$240),
@@ -50,7 +58,7 @@ and the worst peak-to-trough drop was about $160. Paper-trade before using real 
   Each close message says, for example, "best point was +1.1R before the stop — it was well in profit, then reversed".
 - **Monthly review** (last trading day, after the monthly report, or any time with `/learn`): lessons from the
   journal grouped by session, trend strength, trend direction and stop size, plus a re-test of the strategy
-  on ~2.5 years of hourly candles (3 × 5,000 candles from Twelve Data, 3 API credits).
+  on ~2.5 years of hourly candles per pair (3 × 5,000 candles from Twelve Data, 3 API credits per pair). Settings are shared, so a proposal must work on all pairs together.
 - **Guarded changes:** only settings inside the tested safe range can be proposed (factor 4.0–5.0, RR 1.3–1.7,
   ADX and EMA filters on/off). A proposal needs at least 40 back-test trades, must beat the current settings by
   0.10 profit factor in **both** halves of the history, and its neighbouring settings must also be profitable.

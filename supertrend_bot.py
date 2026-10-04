@@ -189,8 +189,77 @@ def reply_to(cmd, d):
     elif cmd == "/settings":        send_msg(cmd_settings())
     elif cmd == "/approve":         send_msg(cmd_approve())
     elif cmd == "/reject":          send_msg(cmd_reject())
+    elif cmd in ("/guide",   "/g"): send_guide()
     elif cmd in ("/help",    "/h", "/start"): send_msg(cmd_help())
     else:                           send_msg("❓ Unknown command. Send /help")
+
+# Bump this when the guide text changes: the bot then sends the new guide once.
+GUIDE_VERSION = 1
+
+def guide_parts():
+    """The full bot guide, split into Telegram-sized messages (HTML mode)."""
+    sp = f"{SPREAD_PIPS}"
+    part1 = (
+        "📘 <b>SUPERTREND PAPER BOT — GUIDE (1/2)</b>\n\n"
+        "<b>What it does</b>\n"
+        "Paper-trades GBP/USD on 1-hour candles and reports here. No real money. "
+        "Runs free on GitHub Actions, checking about every 5 minutes.\n\n"
+        "<b>Settings</b>\n"
+        f"• Pair / timeframe : GBP/USD, 1H\n"
+        f"• Supertrend : ATR {ATR_PERIOD}, factor {ST_FACTOR}\n"
+        f"• Stop loss : at the Supertrend line\n"
+        f"• Target : {RR}× the stop distance\n"
+        f"• Filters : {'ADX on' if S['use_adx_filter'] else 'ADX off'}, "
+        f"{'EMA200 on' if S['use_ema_filter'] else 'EMA200 off'}\n"
+        f"• Size : {LOT_SIZE} lot (about ₹{PIP_USD * INR_PER_USD:.1f} per pip)\n"
+        f"• Paper account : ${PAPER_CAPITAL:.0f} (about {inr(PAPER_CAPITAL)})\n"
+        f"• Cost : {sp} pips taken off every result\n"
+        "• One trade at a time\n\n"
+        "<b>Signal rule</b>\n"
+        "When the Supertrend changes colour on a closed 1H candle: green = BUY, red = SELL, "
+        "entered at the live price. A flip while a trade is open is ignored. About 3 trades a month.\n\n"
+        "<b>Automatic messages (IST)</b>\n"
+        "• Signal — entry, stop, target, risk and reward in ₹, flip candle time to match on TradingView\n"
+        "• Close — target/stop hit, P&amp;L in $ and ₹, result in R, journal note\n"
+        "• Hourly status 1 pm – 11 pm when there is no signal\n"
+        "• End-of-day report ~10:30 pm (weekdays)\n"
+        "• Weekly close Sat ~2:30 am · Market open Mon ~6:30 am\n"
+        "• Monthly report + learning review — last trading day ~10:35 pm"
+    )
+    part2 = (
+        "📘 <b>SUPERTREND PAPER BOT — GUIDE (2/2)</b>\n\n"
+        "<b>Commands</b> (replies come on the next run, within a few minutes)\n"
+        "/status or /s — bot alive, settings, Supertrend colour, price\n"
+        "/balance or /b — balance, P&amp;L in $ and ₹, win rate\n"
+        "/trades or /t — open trade, distance to stop and target\n"
+        "/log or /l — last 5 closed trades\n"
+        "/month or /m — this month's summary\n"
+        "/learn — lessons from the trades + settings re-test (about a minute)\n"
+        "/settings — active settings and any pending proposal\n"
+        "/approve — apply the pending proposal\n"
+        "/reject — keep the current settings\n"
+        "/guide or /g — this guide\n"
+        "/help or /h — short command list\n\n"
+        "<b>How the bot learns</b>\n"
+        "1. Every trade is journalled: why it was taken (session, trend strength, with/against "
+        "EMA200, stop size) and how it went (best and worst point, hours held).\n"
+        "2. Monthly (or /learn) it sends lessons grouped by those factors, and re-tests factor "
+        "4.0–5.0, RR 1.3–1.7 and the ADX / EMA filters on ~2.5 years of candles.\n"
+        "3. It proposes a change only if it beats the current settings in BOTH halves of that "
+        "history, on 40+ trades, with nearby settings also profitable.\n"
+        "4. You decide: /approve or /reject. After a change, put the same numbers into both "
+        "TradingView scripts.\n\n"
+        "<b>Good to know</b>\n"
+        "• Judge it after 3 months on profit factor (/balance, /month), not single trades.\n"
+        "• History: GBP/USD 2012–2022 profit factor ~1.25, ~60% of months profitable; "
+        "2025–2026 about break-even after costs.\n"
+        "• Full trade records: paper_trades.json in your GitHub repo."
+    )
+    return [part1, part2]
+
+def send_guide():
+    for part in guide_parts():
+        send_msg(part)
 
 def cmd_help():
     return (
@@ -204,6 +273,7 @@ def cmd_help():
         "/settings         —  Active settings and any pending proposal\n"
         "/approve          —  Apply the pending proposal\n"
         "/reject           —  Discard the pending proposal\n"
+        "/guide   (or /g)  —  Full bot guide\n"
         "/help    (or /h)  —  This message\n\n"
         "<i>Runs on GitHub Actions: checks about every 5 minutes, "
         "so replies can take a few minutes.</i>"
@@ -1019,6 +1089,11 @@ def run(d, now_utc, now_ist):
     commands = fetch_commands(meta)
     due      = reports_due(meta, now_ist)
     is_open  = market_open(now_utc)
+
+    # Send the guide once after each guide update (recorded in paper_trades.json)
+    if meta.get("guide_version") != GUIDE_VERSION:
+        send_guide()
+        meta["guide_version"] = GUIDE_VERSION
 
     print(f"[{now_ist.strftime('%d %b %H:%M IST')}] market_open={is_open} "
           f"commands={commands} reports_due={due}")

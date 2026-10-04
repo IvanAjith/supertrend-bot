@@ -7,24 +7,34 @@ strategy("Supertrend Strategy (bot replica)", overlay=true, initial_capital=300,
 // Backtest version of the Telegram bot. Use on GBPUSD, 1H chart.
 // Same rules and numbers as supertrend_bot.py: ATR 13, factor 4.5, RR 1.5,
 // entry at the flip candle's close, stop at the Supertrend line, one trade at a time.
-// 0.01 lot = 1,000 units. Commission 0.075 per order = about 1.5 pips round trip
-// (Settings > Properties > Commission to change).
+// 0.01 lot = 1,000 units. Spread = 1.5 pips per trade, charged as commission:
+//   account in USD -> 0.075 per order (the default below)
+//   account in INR -> set Settings > Properties > Commission to 6.6 (Fixed) per order
+// If the bot's learning review changes a setting (after /approve), change it here too.
 
 atrLen   = input.int(13,     "ATR period",        minval=1)
 factor   = input.float(4.5,  "Supertrend factor", minval=0.1, step=0.01)
 rr       = input.float(1.5,  "Reward : Risk",     minval=0.1, step=0.1)
 fromDate = input.time(timestamp("01 Jan 2025 00:00 +0530"), "Backtest from")
 showTbl  = input.bool(true,  "Show monthly table")
+useAdx   = input.bool(false, "ADX filter — trade only when ADX(14) ≥", inline="adx")
+adxMin   = input.int(20, "", minval=1, inline="adx")
+useEma   = input.bool(false, "EMA filter — trade only in the direction of EMA", inline="ema")
+emaLen   = input.int(200, "", minval=1, inline="ema")
 
 // ---------- Supertrend ----------
 [st, dir] = ta.supertrend(factor, atrLen)          // dir < 0 = uptrend, dir > 0 = downtrend
 flipUp = dir < 0 and dir[1] > 0
 flipDn = dir > 0 and dir[1] < 0
+[diPlus, diMinus, adxV] = ta.dmi(14, 14)
+emaV    = ta.ema(close, emaLen)
+okLong  = (not useAdx or adxV >= adxMin) and (not useEma or close > emaV)
+okShort = (not useAdx or adxV >= adxMin) and (not useEma or close < emaV)
 plot(dir < 0 ? st : na, "Uptrend",   color=color.green, linewidth=2, style=plot.style_linebr)
 plot(dir > 0 ? st : na, "Downtrend", color=color.red,   linewidth=2, style=plot.style_linebr)
 
 // ---------- Entries: only when flat (one trade at a time) ----------
-if strategy.position_size == 0 and time >= fromDate and (flipUp or flipDn)
+if strategy.position_size == 0 and time >= fromDate and ((flipUp and okLong) or (flipDn and okShort))
     dist = math.abs(close - st)                    // stop distance = close to Supertrend line
     if flipUp
         strategy.entry("BUY", strategy.long)

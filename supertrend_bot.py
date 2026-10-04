@@ -12,10 +12,18 @@ How it runs
 
 Strategy (Oct 2026 settings — backtested in TradingView and on 2012–2022 data)
   Pairs     : GBP/USD               Timeframe : 1H candles
-  Settings  : ATR 13, Factor 4.5, RR 1.5
+  Settings  : ATR 13, Factor 4.5, RR 1.5, no filters  (strategy_settings.json)
+  Costs     : 1.5 pips per trade deducted from every result
   Capital   : $300 paper account, 0.01 lot ($0.10 per pip)
   Same numbers as tradingview/supertrend_paper_bot.pine and
   tradingview/supertrend_strategy.pine — keep all three in sync.
+
+Learning (learner.py)
+  Every trade stores WHY it was taken (session, ADX, EMA side, stop size) and
+  HOW it went (best / worst point before the exit). Monthly — or on /learn —
+  the bot sends lessons from that journal and re-tests the strategy on ~2.5
+  years of candles. It proposes a settings change only when the change wins in
+  both halves of that history; /approve applies it (AUTO_APPLY skips the ask).
 
 What changed vs the Railway version
   - No endless loop / scheduler: one pass per run, state lives in the repo
@@ -36,6 +44,8 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
+import learner as L
+
 # =============================================================
 #  CONFIG — secrets come from GitHub Actions secrets (env vars)
 # =============================================================
@@ -43,20 +53,40 @@ TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN",  "")
 CHAT_ID         = os.environ.get("CHAT_ID",         "")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 
-ATR_PERIOD    = 13
-ST_FACTOR     = 4.5
-RR            = 1.5
+# Strategy settings (ATR, factor, RR, filters) live in strategy_settings.json
+# so the learning review can update them after /approve. These module values
+# are refreshed from that file at the start of every run (see apply_settings).
+S             = dict(L.DEFAULTS)
+LEARN_META    = {"pending": None, "history": [], "last_review": None}
+ATR_PERIOD    = S["atr_period"]
+ST_FACTOR     = S["factor"]
+RR            = S["rr"]
+
 PAPER_CAPITAL = 300.0
 LOT_SIZE      = 0.01
 PIP_USD       = 0.10      # $ per pip at 0.01 lot on a USD-quoted pair
+SPREAD_PIPS   = 1.5       # cost per trade (spread + slippage), same as TradingView
+INR_PER_USD   = 88.0      # only for showing rupee amounts (approximate)
+
+# Learning: False = proposals wait for /approve.  True = applied automatically.
+AUTO_APPLY    = False
+HISTORY_PAGES = 3         # x 5,000 hourly candles (~2.5 years) for the monthly re-test
 
 PAIRS = {
     "GBP/USD": "GBP/USD",
 }
 
-# Candles fetched per run. Supertrend depends on the whole price path, so a
-# long history keeps the bot's line identical to TradingView's.
-CANDLES = 500
+# Candles fetched per run. Supertrend, ADX and EMA depend on the whole price
+# path, so a long history keeps the bot's values identical to TradingView's.
+CANDLES = 1000
+
+def apply_settings(s):
+    global S, ATR_PERIOD, ST_FACTOR, RR
+    S = dict(s)
+    ATR_PERIOD, ST_FACTOR, RR = S["atr_period"], S["factor"], S["rr"]
+
+def inr(usd):
+    return f"₹{usd * INR_PER_USD:,.0f}"
 
 IST          = timezone(timedelta(hours=5, minutes=30))
 NO_SIG_START = 13          # hourly status window (IST hours)
@@ -155,6 +185,10 @@ def reply_to(cmd, d):
     elif cmd in ("/trades",  "/t"): send_msg(cmd_trades(d))
     elif cmd in ("/month",   "/m"): monthly_report(d)
     elif cmd in ("/log",     "/l"): send_msg(cmd_log(d))
+    elif cmd == "/learn":           learning_review(d)
+    elif cmd == "/settings":        send_msg(cmd_settings())
+    elif cmd == "/approve":         send_msg(cmd_approve())
+    elif cmd == "/reject":          send_msg(cmd_reject())
     elif cmd in ("/help",    "/h", "/start"): send_msg(cmd_help())
     else:                           send_msg("❓ Unknown command. Send /help")
 
@@ -166,6 +200,10 @@ def cmd_help():
         "/trades  (or /t)  —  Open trades + distances\n"
         "/log     (or /l)  —  Last 5 closed trades\n"
         "/month   (or /m)  —  This month's summary\n"
+        "/learn            —  Lessons from the trades + settings re-test\n"
+        "/settings         —  Active settings and any pending proposal\n"
+        "/approve          —  Apply the pending proposal\n"
+        "/reject           —  Discard the pending proposal\n"
         "/help    (or /h)  —  This message\n\n"
         "<i>Runs on GitHub Actions: checks about every 5 minutes, "
         "so replies can take a few minutes.</i>"
@@ -177,7 +215,7 @@ def cmd_status(d):
         "✅ <b>BOT IS ALIVE</b>\n",
         f"<b>Time</b>   :  {now}",
         f"<b>Pairs</b>  :  {' + '.join(PAIRS)}",
-        f"<b>Setup</b>  :  ATR {ATR_PERIOD} · Factor {ST_FACTOR} · RR 1:{RR}",
+        f"<b>Setup</b>  :  {L.describe(S)}",
         f"<b>Check</b>  :  About every 5 minutes\n",
         "─── SUPERTREND STATUS ───"
     ]
@@ -210,10 +248,11 @@ def cmd_balance(d):
     s2    = "+" if ret >= 0 else ""
     return (
         "💰 <b>PAPER ACCOUNT BALANCE</b>\n\n"
-        f"<b>Starting Capital</b>  :  ${PAPER_CAPITAL}\n"
-        f"<b>Current Balance</b>   :  ${round(cap,  2)}\n"
-        f"<b>Total P&L</b>         :  {s1}{round(pnl, 2)} USD\n"
-        f"<b>Total Return</b>      :  {s2}{ret}%\n\n"
+        f"<b>Starting Capital</b>  :  ${PAPER_CAPITAL}  (≈{inr(PAPER_CAPITAL)})\n"
+        f"<b>Current Balance</b>   :  ${round(cap,  2)}  (≈{inr(cap)})\n"
+        f"<b>Total P&amp;L</b>         :  {s1}{round(pnl, 2)} USD  (≈{inr(pnl)})\n"
+        f"<b>Total Return</b>      :  {s2}{ret}%\n"
+        f"<i>P&amp;L is after a {SPREAD_PIPS}-pip spread per trade.</i>\n\n"
         f"<b>Trades Closed</b>     :  {total}\n"
         f"<b>Wins / Losses</b>     :  {wins} / {total - wins}\n"
         f"<b>Win Rate</b>          :  {wr}%\n\n"
@@ -290,16 +329,18 @@ def cmd_trades(d):
 # =============================================================
 #  DATA FETCH
 # =============================================================
-def get_data(symbol):
+def get_data(symbol, outputsize=CANDLES, end_date=None):
     url    = "https://api.twelvedata.com/time_series"
     params = {
         "symbol":     symbol,
         "interval":   "1h",
-        "outputsize": CANDLES,
+        "outputsize": outputsize,
         "timezone":   "UTC",       # candle timestamps in UTC (exit logic relies on it)
         "apikey":     TWELVE_DATA_KEY,
         "format":     "JSON"
     }
+    if end_date:
+        params["end_date"] = end_date
     for attempt in range(1, 4):
         try:
             r = requests.get(url, params=params, timeout=15)
@@ -327,6 +368,21 @@ def get_data(symbol):
             time.sleep(5)
     return pd.DataFrame()
 
+def get_history(symbol, pages=HISTORY_PAGES):
+    """About pages x 5,000 hourly candles, oldest first (for the learning re-test)."""
+    frames, end = [], None
+    for _ in range(pages):
+        df = get_data(symbol, outputsize=5000, end_date=end)
+        if df.empty:
+            break
+        frames.append(df)
+        end = (df.index[0] - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        time.sleep(8)              # stay under the free plan's per-minute limit
+    if not frames:
+        return pd.DataFrame()
+    h = pd.concat(frames).sort_index()
+    return h[~h.index.duplicated(keep="last")]
+
 def get_live_price(symbol):
     """Latest price right now (not candle close)."""
     url    = "https://api.twelvedata.com/price"
@@ -342,45 +398,17 @@ def get_live_price(symbol):
     return None
 
 def calc_supertrend(df):
+    """Adds st / dir / atr / adx / ema columns — same maths as TradingView (see learner.py)."""
+    if df.empty:
+        return df
     try:
-        h, l, c = df["high"], df["low"], df["close"]
-        tr  = pd.concat([h-l, abs(h-c.shift(1)), abs(l-c.shift(1))], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
-        hl2 = (h + l) / 2
-        bu  = hl2 + ST_FACTOR * atr
-        bl  = hl2 - ST_FACTOR * atr
-        fu  = bu.copy()
-        fl  = bl.copy()
-        for i in range(1, len(df)):
-            fu.iloc[i] = bu.iloc[i] if bu.iloc[i] < fu.iloc[i-1] \
-                         or c.iloc[i-1] > fu.iloc[i-1] else fu.iloc[i-1]
-            fl.iloc[i] = bl.iloc[i] if bl.iloc[i] > fl.iloc[i-1] \
-                         or c.iloc[i-1] < fl.iloc[i-1] else fl.iloc[i-1]
-        direction  = pd.Series(1.0, index=df.index)
-        supertrend = pd.Series(fu.iloc[0], index=df.index)
-        for i in range(1, len(df)):
-            if direction.iloc[i-1] == 1:
-                if c.iloc[i] > fu.iloc[i]:
-                    direction.iloc[i]  = -1
-                    supertrend.iloc[i] = fl.iloc[i]
-                else:
-                    direction.iloc[i]  = 1
-                    supertrend.iloc[i] = fu.iloc[i]
-            else:
-                if c.iloc[i] < fl.iloc[i]:
-                    direction.iloc[i]  = 1
-                    supertrend.iloc[i] = fu.iloc[i]
-                else:
-                    direction.iloc[i]  = -1
-                    supertrend.iloc[i] = fl.iloc[i]
-        df        = df.copy()
-        df["st"]  = supertrend
-        df["dir"] = direction
+        return L.add_indicators(df, S)
     except Exception as e:
-        print(f"  [ST Error] {e}")
-    return df
+        print(f"  [Indicator Error] {e}")
+        return df
 
 def detect_signal(df):
+    """Flip on the last CLOSED candle (df.iloc[-2]) that passes the active filters."""
     if len(df) < 4 or "dir" not in df.columns:
         return None, None, None, None, None
     try:
@@ -391,9 +419,13 @@ def detect_signal(df):
         pd_   = float(p["dir"])
         cd_   = float(c["dir"])
         if pd_ == 1 and cd_ == -1 and (close - st) > 0:
-            return "long",  close, st, close + (close-st)*RR, ct
+            if L.filters_ok(1, close, float(c["adx"]), float(c["ema"]), S):
+                return "long",  close, st, close + (close-st)*RR, ct
+            print("  [Filtered] long flip skipped by filter")
         if pd_ == -1 and cd_ == 1 and (st - close) > 0:
-            return "short", close, st, close - (st-close)*RR, ct
+            if L.filters_ok(-1, close, float(c["adx"]), float(c["ema"]), S):
+                return "short", close, st, close - (st-close)*RR, ct
+            print("  [Filtered] short flip skipped by filter")
     except Exception as e:
         print(f"  [Signal Error] {e}")
     return None, None, None, None, None
@@ -458,8 +490,8 @@ def sig_msg(pair, direction, live_price, candle_close, sl_from_candle, tp_from_c
         f"📍 <b>Entry</b>     :  {round(entry, 5)}  ← live price\n"
         f"🛑 <b>Stop Loss</b> :  {round(sl,    5)}  ({slp} pips)\n"
         f"🎯 <b>Target</b>    :  {round(tp,    5)}  ({tpp} pips)\n\n"
-        f"💼 Lot:{LOT_SIZE}  💸 Risk:-${loss}  💰 Reward:+${prof}\n"
-        f"📊 RR: 1:{RR}\n"
+        f"💼 Lot:{LOT_SIZE}  💸 Risk:-${loss} ({inr(loss)})  💰 Reward:+${prof} ({inr(prof)})\n"
+        f"📊 RR: 1:{RR}   ⚙️ {L.describe(S)}\n"
         f"{chart}\n"
         f"<i>✅ Paper trade logged automatically.</i>\n\n"
         f"{bar}"
@@ -478,22 +510,33 @@ def status_msg(statuses):
     return "\n".join(lines)
 
 def close_msg(pair, direction, entry, exit_px, pnl, pips, result, bal,
-              trade_id=None, hours=None):
+              trade_id=None, hours=None, r_mult=None, mfe_r=None, mae_r=None):
     em   = "✅" if "TP" in result else "❌"
     lb   = "TARGET HIT — PROFIT" if "TP" in result else "STOP HIT — LOSS"
     sign = "+" if pnl >= 0 else ""
     tid  = f" (#{trade_id})" if trade_id else ""
     dur  = f"<b>Duration</b>  :  {hours} hours\n" if hours is not None else ""
+    why  = ""
+    if mfe_r is not None and mae_r is not None:
+        if "TP" in result:
+            why = (f"\n📝 <b>Journal</b>: worst point was {mae_r:+.2f}R before the target"
+                   + (" — nearly stopped out." if mae_r <= -0.7 else "."))
+        else:
+            why = (f"\n📝 <b>Journal</b>: best point was {mfe_r:+.2f}R before the stop"
+                   + (" — it was well in profit, then reversed." if mfe_r >= 0.8 else
+                      " — it never really got going."))
+    rtxt = f"  ·  {r_mult:+.2f}R" if r_mult is not None else ""
     return (
         f"{em} <b>TRADE CLOSED — {pair}{tid}</b>\n\n"
         f"<b>Result</b>    :  {lb}\n"
         f"<b>Direction</b> :  {direction.upper()}\n\n"
         f"<b>Entry</b>     :  {round(entry,   5)}\n"
         f"<b>Exit</b>      :  {round(exit_px, 5)}\n"
-        f"<b>P&L</b>       :  {sign}{round(pnl,2)} USD "
-        f"({sign}{round(pips,1)} pips)\n"
+        f"<b>P&amp;L</b>       :  {sign}{round(pnl,2)} USD ({sign}{inr(pnl).replace('₹-', '-₹')}) "
+        f"({sign}{round(pips,1)} pips after spread){rtxt}\n"
         f"{dur}\n"
-        f"<b>Balance</b>   :  ${round(bal,2)}"
+        f"<b>Balance</b>   :  ${round(bal,2)} (≈{inr(bal)})"
+        f"{why}"
     )
 
 def _open_position_lines(d, extra=""):
@@ -705,6 +748,83 @@ def send_reports(d, due, now_ist):
             weekly_open_message(d);  meta["last_weekly_open"] = today
         elif name == "monthly":
             monthly_report(d);       meta["last_monthly"] = now_ist.strftime("%Y-%m")
+            learning_review(d)
+
+
+# =============================================================
+#  LEARNING — monthly lessons + guarded re-tuning (see learner.py)
+# =============================================================
+def _settings_table(s):
+    return (f"   ATR period        :  {s['atr_period']}\n"
+            f"   Supertrend factor :  {s['factor']}\n"
+            f"   Reward : Risk     :  {s['rr']}\n"
+            f"   ADX filter        :  {'ON, ' + str(s['adx_min']) + '+' if s['use_adx_filter'] else 'off'}\n"
+            f"   EMA filter        :  {'ON, EMA' + str(s['ema_len']) if s['use_ema_filter'] else 'off'}")
+
+def learning_review(d):
+    """Lessons from the journal + re-test on ~2.5 years of candles. One message per pair."""
+    for pair, sym in PAIRS.items():
+        try:
+            hist = get_history(sym)
+            lines, proposal = L.review(
+                [t for t in d.get("closed_trades", []) if t.get("pair") == pair],
+                hist, S, SPREAD_PIPS)
+        except Exception as e:
+            print(f"[Learn Error] {pair}: {e}")
+            send_msg(f"⚠️ Learning review failed for {pair}: {e}")
+            continue
+        LEARN_META["last_review"] = datetime.now(IST).isoformat(timespec="minutes")
+        if proposal:
+            LEARN_META["pending"] = proposal
+            if AUTO_APPLY:
+                lines.append("\n" + apply_pending("auto-applied by monthly review"))
+            else:
+                lines.append("\nReply /approve to switch, or /reject to keep the current settings.")
+        L.save_settings(S, LEARN_META)
+        send_msg(f"<b>{pair}</b>\n" + "\n".join(lines))
+
+def apply_pending(reason):
+    p = LEARN_META.get("pending")
+    if not p:
+        return "Nothing to apply."
+    old = dict(S)
+    apply_settings({**S, **p["settings"]})
+    LEARN_META["history"].append({
+        "date": datetime.now(IST).strftime("%d/%m/%Y"), "from": old, "to": dict(S),
+        "reason": reason, "evidence": p.get("evidence"),
+    })
+    LEARN_META["pending"] = None
+    L.save_settings(S, LEARN_META)
+    return ("✅ <b>Settings updated</b>\n" + _settings_table(S) +
+            "\n\n⚠️ Update the same numbers in TradingView (indicator and strategy inputs) "
+            "so the chart keeps matching the bot.")
+
+def cmd_settings():
+    out = ["⚙️ <b>ACTIVE SETTINGS</b>\n", _settings_table(S),
+           f"   Spread / trade    :  {SPREAD_PIPS} pips",
+           f"   Auto-apply        :  {'ON' if AUTO_APPLY else 'off (needs /approve)'}"]
+    p = LEARN_META.get("pending")
+    if p:
+        out.append(f"\n💡 <b>Pending proposal</b> ({p['created'][:10]}):\n" + _settings_table(p["settings"]))
+        out.append("Reply /approve or /reject.")
+    if LEARN_META.get("history"):
+        h = LEARN_META["history"][-1]
+        out.append(f"\nLast change: {h['date']} — {h['reason']}")
+    if LEARN_META.get("last_review"):
+        out.append(f"Last review: {LEARN_META['last_review'][:16].replace('T', ' ')} IST")
+    return "\n".join(out)
+
+def cmd_approve():
+    if not LEARN_META.get("pending"):
+        return "Nothing pending. Send /learn to run a review."
+    return apply_pending("approved by you via /approve")
+
+def cmd_reject():
+    if not LEARN_META.get("pending"):
+        return "Nothing pending."
+    LEARN_META["pending"] = None
+    L.save_settings(S, LEARN_META)
+    return "👍 Proposal discarded. Settings unchanged:\n" + _settings_table(S)
 
 
 # =============================================================
@@ -752,11 +872,24 @@ def find_exit(t, df):
         c = float(df["close"].iloc[-1])
         ranges.append((c, c))
 
-    for hi, lo in ranges:
+    # Track how far price went for / against the trade before the exit
+    # (journal data: "was it in profit before the stop?", "nearly stopped?").
+    risk = abs(t["entry"] - t["sl"]) or 1e-9
+    side = 1 if t["direction"] == "long" else -1
+    best = worst = 0.0
+    for n, (hi, lo) in enumerate(ranges, start=1):
         res = _hit(t, hi, lo)
+        fav = (hi - t["entry"]) if side == 1 else (t["entry"] - lo)
+        adv = (lo - t["entry"]) if side == 1 else (t["entry"] - hi)
+        if res == "SL HIT":
+            adv = -risk
+            fav = min(fav, (t["tp"] - t["entry"]) * side)
+        elif res == "TP HIT":
+            fav = (t["tp"] - t["entry"]) * side
+        best, worst = max(best, fav / risk), min(worst, adv / risk)
         if res:
-            return res
-    return None
+            return res, round(best, 2), round(max(worst, -1.0), 2), n
+    return None, round(best, 2), round(max(worst, -1.0), 2), len(ranges)
 
 def check_exits(d, dfs):
     for pair, t in list(d.get("open_trades", {}).items()):
@@ -764,13 +897,15 @@ def check_exits(d, dfs):
         if df is None or df.empty:
             continue
         try:
-            res = find_exit(t, df)
+            res, mfe_r, mae_r, bars = find_exit(t, df)
             if not res:
                 continue
-            ep   = t["tp"] if res == "TP HIT" else t["sl"]
-            pips = (ep-t["entry"])*10000 if t["direction"] == "long" \
-                   else (t["entry"]-ep)*10000
-            pnl  = round(pips*PIP_USD, 2)
+            ep    = t["tp"] if res == "TP HIT" else t["sl"]
+            gross = (ep-t["entry"])*10000 if t["direction"] == "long" \
+                    else (t["entry"]-ep)*10000
+            pips  = gross - SPREAD_PIPS                   # same cost as TradingView
+            pnl   = round(pips*PIP_USD, 2)
+            r_mult = round(pips / t["sl_pips"], 2) if t.get("sl_pips") else None
             d["capital"]   = d.get("capital",   PAPER_CAPITAL) + pnl
             d["total_pnl"] = d.get("total_pnl", 0.0)          + pnl
             now_ist = datetime.now(IST)
@@ -779,6 +914,8 @@ def check_exits(d, dfs):
             d.setdefault("closed_trades", []).append({
                 **t, "exit_price": ep, "pnl_usd": pnl,
                 "pnl_pips": round(pips, 1), "result": res,
+                "r_multiple": r_mult, "mfe_r": mfe_r, "mae_r": mae_r,
+                "bars_held": bars,
                 "duration_hours": hours,
                 "balance_after": round(d["capital"], 2),
                 "closed_at": now_ist.isoformat()
@@ -786,7 +923,8 @@ def check_exits(d, dfs):
             del d["open_trades"][pair]
             send_msg(close_msg(pair, t["direction"], t["entry"],
                                ep, pnl, pips, res, d["capital"],
-                               trade_id=t.get("id"), hours=hours))
+                               trade_id=t.get("id"), hours=hours,
+                               r_mult=r_mult, mfe_r=mfe_r, mae_r=mae_r))
             print(f"[Closed] {pair} {res} PnL:{pnl}")
         except Exception as e:
             print(f"[Exit Error] {pair}: {e}")
@@ -820,6 +958,12 @@ def scan_signals(d, dfs):
         print(f"  {pair}: *** {sig.upper()} ***")
         print(f"  Candle close: {candle_close:.5f}  Live price: {live_price:.5f}")
 
+        try:
+            features = L.entry_features(df, len(df) - 2, 1 if sig == "long" else -1)
+        except Exception as e:
+            print(f"  [Features Error] {e}")
+            features = None
+
         meta["trade_seq"] = meta.get("trade_seq", 0) + 1
         trade_id = meta["trade_seq"]
         msg, entry, sl, tp = sig_msg(
@@ -841,7 +985,10 @@ def scan_signals(d, dfs):
             "lot": LOT_SIZE,
             "signal_candle_utc": ctime,          # open time of the 1H flip candle
             "candle_close": candle_close,        # TradingView-style entry price
-            "opened_at": datetime.now(IST).isoformat()
+            "opened_at": datetime.now(IST).isoformat(),
+            # Journal: why this trade was taken (used by the learning review)
+            "features": features,
+            "settings": dict(S),
         }
         send_msg(msg)
 
@@ -920,6 +1067,11 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(IST)
+
+    s, lmeta = L.load_settings()
+    apply_settings(s)
+    LEARN_META.update(lmeta)
+    print(f"[Settings] {L.describe(S)}")
 
     d      = load()
     before = json.dumps(d, sort_keys=True)

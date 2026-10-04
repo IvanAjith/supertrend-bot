@@ -224,16 +224,34 @@ def pf(R):
         return float(g / b)
     return 9.99 if g > 0 else 0.0
 
-def retest(df, s, spread_pips):
-    mid = df.index[len(df) // 2]
+def _split_score(parts):
+    """parts: list of (first-half R, second-half R) — one per pair — pooled together."""
+    a = pd.concat([p[0] for p in parts]) if parts else pd.Series(dtype=float)
+    b = pd.concat([p[1] for p in parts]) if parts else pd.Series(dtype=float)
+    R = pd.concat([a, b])
+    return {"n": int(len(R)), "pf": pf(R), "pf1": pf(a), "pf2": pf(b),
+            "n1": int(len(a)), "n2": int(len(b)), "net_r": round(float(R.sum()), 1)}
+
+def retest(dfs, s, spread_pips):
+    """dfs: {pair: hourly DataFrame} (or a single DataFrame). Each pair's history is split
+    at its own midpoint; the halves are pooled so one setting must work for all pairs."""
+    if isinstance(dfs, pd.DataFrame):
+        dfs = {"pair": dfs}
+    mids = {p: d.index[len(d) // 2] for p, d in dfs.items()}
+
+    def parts(cfg):
+        out = {}
+        for p, d in dfs.items():
+            R = backtest(d, cfg, spread_pips)
+            out[p] = (R[R.index < mids[p]], R[R.index >= mids[p]])
+        return out
 
     def score(cfg):
-        R = backtest(df, cfg, spread_pips)
-        a, b = R[R.index < mid], R[R.index >= mid]
-        return {"n": int(len(R)), "pf": pf(R), "pf1": pf(a), "pf2": pf(b),
-                "n1": int(len(a)), "n2": int(len(b)), "net_r": round(float(R.sum()), 1)}
+        return _split_score(list(parts(cfg).values()))
 
-    cur = score(s)
+    cur_parts = parts(s)
+    cur = _split_score(list(cur_parts.values()))
+    cur["by_pair"] = {p: _split_score([v]) for p, v in cur_parts.items()}
     grid = {}
     cands = []
     for f in FACTOR_GRID:
@@ -280,7 +298,8 @@ def journal_lessons(closed_trades):
         f = t.get("features")
         if not f or "r_multiple" not in t:
             continue
-        rows.append({**f, "R": t["r_multiple"], "win": "TP" in t.get("result", ""),
+        rows.append({**f, "pair": t.get("pair", "?"),
+                     "R": t["r_multiple"], "win": "TP" in t.get("result", ""),
                      "mfe": t.get("mfe_r"), "mae": t.get("mae_r"),
                      "bars": t.get("bars_held")})
     if not rows:
@@ -299,8 +318,11 @@ def journal_lessons(closed_trades):
     j["ema"] = np.where(j["ema_side"] == "with", "with EMA200", "against EMA200")
 
     patterns = []
-    for col, title in (("session", "By session"), ("trend_strength", "By trend strength"),
-                       ("ema", "By trend direction"), ("stop_size", "By stop size")):
+    groupings = [("session", "By session"), ("trend_strength", "By trend strength"),
+                 ("ema", "By trend direction"), ("stop_size", "By stop size")]
+    if j["pair"].nunique() > 1:
+        groupings.insert(0, ("pair", "By pair"))
+    for col, title in groupings:
         out.append(f"\n{title}")
         groups = {k: g for k, g in j.groupby(col)}
         for k, g in groups.items():
@@ -340,21 +362,40 @@ def journal_lessons(closed_trades):
 # =============================================================
 #  FULL MONTHLY REVIEW
 # =============================================================
-def review(closed_trades, history_df, s, spread_pips):
-    """Returns (report lines, proposal dict or None)."""
+def review(closed_trades, histories, s, spread_pips):
+    """histories: {pair: hourly DataFrame}. Returns (report lines, proposal dict or None)."""
     lines = ["🧠 <b>LEARNING REVIEW</b>\n", f"<b>Current</b>: {describe(s)}\n"]
     lines += journal_lessons(closed_trades)
 
-    if history_df is None or len(history_df) < 2000:
-        lines.append("\n⚠️ Not enough price history downloaded for the re-test — settings unchanged.")
+    if isinstance(histories, pd.DataFrame) or histories is None:
+        histories = {"pair": histories}
+    usable = {p: h for p, h in histories.items() if h is not None and len(h) >= 2000}
+    for p in histories:
+        if p not in usable:
+            lines.append(f"\n⚠️ Not enough price history downloaded for {p} — left out of the re-test.")
+    if not usable:
+        lines.append("Settings unchanged.")
         return lines, None
 
-    start = history_df.index[0].strftime("%d/%m/%Y")
-    end = history_df.index[-1].strftime("%d/%m/%Y")
-    cur, grid, best = retest(history_df, s, spread_pips)
-    lines.append(f"\n<b>Re-test</b> {start} – {end} (same rules, after spread)")
+    start = min(h.index[0] for h in usable.values()).strftime("%d/%m/%Y")
+    end = max(h.index[-1] for h in usable.values()).strftime("%d/%m/%Y")
+    cur, grid, best = retest(usable, s, spread_pips)
+    lines.append(f"\n<b>Re-test</b> {start} – {end} (same rules, after spread, "
+                 f"{' + '.join(usable)})")
     lines.append(f"   Current settings: {cur['n']} trades · PF {cur['pf']:.2f} "
                  f"(first half {cur['pf1']:.2f}, second half {cur['pf2']:.2f}) · {cur['net_r']:+.1f}R")
+    if len(usable) > 1:
+        for p, r in cur["by_pair"].items():
+            warn = ""
+            if r["n"] >= 20 and r["pf1"] < 1.0 and r["pf2"] < 1.0:
+                warn = "  ⚠️ losing in both halves"
+            lines.append(f"     {p}: {r['n']} trades · PF {r['pf1']:.2f} → {r['pf2']:.2f} · "
+                         f"{r['net_r']:+.1f}R{warn}")
+        losing = [p for p, r in cur["by_pair"].items()
+                  if r["n"] >= 20 and r["pf1"] < 1.0 and r["pf2"] < 1.0]
+        if losing:
+            lines.append(f"   💡 Consider removing {', '.join(losing)} from PAIRS — it lost in both "
+                         f"halves of the history. (Pairs are never removed automatically.)")
     top = sorted(grid.items(), key=lambda kv: min(kv[1]["pf1"], kv[1]["pf2"]), reverse=True)[:3]
     lines.append("   Steadiest settings in the safe range:")
     for (f, rr), r in top:

@@ -1,0 +1,14 @@
+{
+  "active": {
+    "atr_period": 13,
+    "factor": 4.5,
+    "rr": 1.5,
+    "use_adx_filter": false,
+    "adx_min": 20,
+    "use_ema_filter": false,
+    "ema_len": 200
+  },
+  "pending": null,
+  "history": [],
+  "last_review": null
+}

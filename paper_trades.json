@@ -1,15 +1,55 @@
 {
   "capital": 300.0,
-  "open_trades": {},
+  "open_trades": {
+    "EUR/USD": {
+      "id": 1,
+      "pair": "EUR/USD",
+      "direction": "long",
+      "entry": 1.12391,
+      "sl": 1.11668,
+      "tp": 1.13476,
+      "sl_pips": 72.3,
+      "tp_pips": 108.5,
+      "risk_usd": 7.23,
+      "reward_usd": 10.85,
+      "lot": 0.01,
+      "signal_candle_utc": "2026-10-06 07:00:00",
+      "candle_close": 1.1242,
+      "opened_at": "2026-10-06T13:31:35.400109+05:30",
+      "features": {
+        "hour_utc": 7,
+        "session": "London",
+        "weekday": "Tue",
+        "adx": 20.0,
+        "ema_side": "against",
+        "atr_pips": 13.3,
+        "stop_pips": 72.3,
+        "stop_atr": 5.44,
+        "prev_trend_bars": 201
+      },
+      "settings": {
+        "atr_period": 13,
+        "factor": 4.5,
+        "rr": 1.5,
+        "use_adx_filter": false,
+        "adx_min": 20,
+        "use_ema_filter": false,
+        "ema_len": 200
+      }
+    }
+  },
   "closed_trades": [],
   "total_pnl": 0.0,
   "meta": {
     "last_weekly_close": "2026-10-03",
     "last_update_id": 419874234,
     "guide_version": 2,
-    "last_signal": {},
+    "last_signal": {
+      "EUR/USD": "2026-10-06 07:00:00"
+    },
     "last_weekly_open": "2026-10-05",
     "last_status_at": "2026-10-06T13:01:17.937362+05:30",
-    "last_eod": "2026-10-05"
+    "last_eod": "2026-10-05",
+    "trade_seq": 1
   }
 }

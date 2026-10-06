@@ -36,6 +36,42 @@
         "use_ema_filter": false,
         "ema_len": 200
       }
+    },
+    "GBP/USD": {
+      "id": 2,
+      "pair": "GBP/USD",
+      "direction": "long",
+      "entry": 1.32777,
+      "sl": 1.32003,
+      "tp": 1.33939,
+      "sl_pips": 77.4,
+      "tp_pips": 116.2,
+      "risk_usd": 7.74,
+      "reward_usd": 11.62,
+      "lot": 0.01,
+      "signal_candle_utc": "2026-10-06 11:00:00",
+      "candle_close": 1.32764,
+      "opened_at": "2026-10-06T17:31:37.473881+05:30",
+      "features": {
+        "hour_utc": 11,
+        "session": "London",
+        "weekday": "Tue",
+        "adx": 20.9,
+        "ema_side": "with",
+        "atr_pips": 14.4,
+        "stop_pips": 77.4,
+        "stop_atr": 5.38,
+        "prev_trend_bars": 123
+      },
+      "settings": {
+        "atr_period": 13,
+        "factor": 4.5,
+        "rr": 1.5,
+        "use_adx_filter": false,
+        "adx_min": 20,
+        "use_ema_filter": false,
+        "ema_len": 200
+      }
     }
   },
   "closed_trades": [],
@@ -45,11 +81,12 @@
     "last_update_id": 419874236,
     "guide_version": 2,
     "last_signal": {
-      "EUR/USD": "2026-10-06 07:00:00"
+      "EUR/USD": "2026-10-06 07:00:00",
+      "GBP/USD": "2026-10-06 11:00:00"
     },
     "last_weekly_open": "2026-10-05",
     "last_status_at": "2026-10-06T17:01:18.480469+05:30",
     "last_eod": "2026-10-05",
-    "trade_seq": 1
+    "trade_seq": 2
   }
 }

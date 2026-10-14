@@ -1,6 +1,79 @@
 {
   "capital": 265.95,
-  "open_trades": {},
+  "open_trades": {
+    "GBP/USD": {
+      "id": 7,
+      "pair": "GBP/USD",
+      "direction": "short",
+      "entry": 1.3201,
+      "sl": 1.32792,
+      "tp": 1.30837,
+      "sl_pips": 78.2,
+      "tp_pips": 117.3,
+      "risk_usd": 7.82,
+      "reward_usd": 11.73,
+      "lot": 0.01,
+      "signal_candle_utc": "2026-10-14 12:00:00",
+      "candle_close": 1.32063,
+      "opened_at": "2026-10-14T18:31:40.185863+05:30",
+      "features": {
+        "hour_utc": 12,
+        "session": "London",
+        "weekday": "Wed",
+        "adx": 37.5,
+        "ema_side": "with",
+        "atr_pips": 14.5,
+        "stop_pips": 78.2,
+        "stop_atr": 5.39,
+        "prev_trend_bars": 25
+      },
+      "settings": {
+        "atr_period": 13,
+        "factor": 4.5,
+        "rr": 1.5,
+        "use_adx_filter": false,
+        "adx_min": 20,
+        "use_ema_filter": false,
+        "ema_len": 200
+      }
+    },
+    "EUR/USD": {
+      "id": 8,
+      "pair": "EUR/USD",
+      "direction": "short",
+      "entry": 1.11268,
+      "sl": 1.12223,
+      "tp": 1.09836,
+      "sl_pips": 95.5,
+      "tp_pips": 143.2,
+      "risk_usd": 9.55,
+      "reward_usd": 14.32,
+      "lot": 0.01,
+      "signal_candle_utc": "2026-10-14 12:00:00",
+      "candle_close": 1.11312,
+      "opened_at": "2026-10-14T18:31:41.099564+05:30",
+      "features": {
+        "hour_utc": 12,
+        "session": "London",
+        "weekday": "Wed",
+        "adx": 36.7,
+        "ema_side": "with",
+        "atr_pips": 14.4,
+        "stop_pips": 95.5,
+        "stop_atr": 6.62,
+        "prev_trend_bars": 24
+      },
+      "settings": {
+        "atr_period": 13,
+        "factor": 4.5,
+        "rr": 1.5,
+        "use_adx_filter": false,
+        "adx_min": 20,
+        "use_ema_filter": false,
+        "ema_len": 200
+      }
+    }
+  },
   "closed_trades": [
     {
       "id": 2,
@@ -291,12 +364,12 @@
     "last_update_id": 419874242,
     "guide_version": 2,
     "last_signal": {
-      "EUR/USD": "2026-10-13 12:00:00",
-      "GBP/USD": "2026-10-12 15:00:00"
+      "EUR/USD": "2026-10-14 12:00:00",
+      "GBP/USD": "2026-10-14 12:00:00"
     },
     "last_weekly_open": "2026-10-12",
     "last_status_at": "2026-10-14T18:01:21.242707+05:30",
     "last_eod": "2026-10-13",
-    "trade_seq": 6
+    "trade_seq": 8
   }
 }

@@ -1,43 +1,6 @@
 {
-  "capital": 256.25,
-  "open_trades": {
-    "GBP/USD": {
-      "id": 7,
-      "pair": "GBP/USD",
-      "direction": "short",
-      "entry": 1.3201,
-      "sl": 1.32792,
-      "tp": 1.30837,
-      "sl_pips": 78.2,
-      "tp_pips": 117.3,
-      "risk_usd": 7.82,
-      "reward_usd": 11.73,
-      "lot": 0.01,
-      "signal_candle_utc": "2026-10-14 12:00:00",
-      "candle_close": 1.32063,
-      "opened_at": "2026-10-14T18:31:40.185863+05:30",
-      "features": {
-        "hour_utc": 12,
-        "session": "London",
-        "weekday": "Wed",
-        "adx": 37.5,
-        "ema_side": "with",
-        "atr_pips": 14.5,
-        "stop_pips": 78.2,
-        "stop_atr": 5.39,
-        "prev_trend_bars": 25
-      },
-      "settings": {
-        "atr_period": 13,
-        "factor": 4.5,
-        "rr": 1.5,
-        "use_adx_filter": false,
-        "adx_min": 20,
-        "use_ema_filter": false,
-        "ema_len": 200
-      }
-    }
-  },
+  "capital": 248.28,
+  "open_trades": {},
   "closed_trades": [
     {
       "id": 2,
@@ -367,9 +330,56 @@
       "duration_hours": 13.24,
       "balance_after": 256.25,
       "closed_at": "2026-10-15T07:45:59.849893+05:30"
+    },
+    {
+      "id": 7,
+      "pair": "GBP/USD",
+      "direction": "short",
+      "entry": 1.3201,
+      "sl": 1.32792,
+      "tp": 1.30837,
+      "sl_pips": 78.2,
+      "tp_pips": 117.3,
+      "risk_usd": 7.82,
+      "reward_usd": 11.73,
+      "lot": 0.01,
+      "signal_candle_utc": "2026-10-14 12:00:00",
+      "candle_close": 1.32063,
+      "opened_at": "2026-10-14T18:31:40.185863+05:30",
+      "features": {
+        "hour_utc": 12,
+        "session": "London",
+        "weekday": "Wed",
+        "adx": 37.5,
+        "ema_side": "with",
+        "atr_pips": 14.5,
+        "stop_pips": 78.2,
+        "stop_atr": 5.39,
+        "prev_trend_bars": 25
+      },
+      "settings": {
+        "atr_period": 13,
+        "factor": 4.5,
+        "rr": 1.5,
+        "use_adx_filter": false,
+        "adx_min": 20,
+        "use_ema_filter": false,
+        "ema_len": 200
+      },
+      "exit_price": 1.32792,
+      "pnl_usd": -7.97,
+      "pnl_pips": -79.7,
+      "result": "SL HIT",
+      "r_multiple": -1.02,
+      "mfe_r": 0.8,
+      "mae_r": -1.0,
+      "bars_held": 38,
+      "duration_hours": 37.65,
+      "balance_after": 248.28,
+      "closed_at": "2026-10-16T08:10:53.668432+05:30"
     }
   ],
-  "total_pnl": -43.75,
+  "total_pnl": -51.72,
   "meta": {
     "last_weekly_close": "2026-10-10",
     "last_update_id": 419874242,

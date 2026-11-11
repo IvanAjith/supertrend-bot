@@ -701,14 +701,14 @@
   "total_pnl": -27.8,
   "meta": {
     "last_weekly_close": "2026-11-07",
-    "last_update_id": 419874247,
+    "last_update_id": 419874248,
     "guide_version": 2,
     "last_signal": {
       "EUR/USD": "2026-11-06 03:00:00",
       "GBP/USD": "2026-11-06 03:00:00"
     },
     "last_weekly_open": "2026-11-09",
-    "last_status_at": "2026-11-11T15:01:17.192493+05:30",
+    "last_status_at": "2026-11-11T16:01:18.924289+05:30",
     "last_eod": "2026-11-10",
     "trade_seq": 15,
     "last_monthly": "2026-10"
